@@ -104,6 +104,22 @@ wait_for_apt() {
 }
 
 ###############################################################################
+# FUNCTION: refresh_apt_package_lists
+# Description: Refresh APT package indexes once during startup, before dependency
+#              checks/installations. This intentionally does not upgrade packages.
+###############################################################################
+refresh_apt_package_lists() {
+    log "Refreshing APT package indexes."
+    wait_for_apt
+    if sudo apt-get update; then
+        log "APT package indexes refreshed successfully."
+    else
+        log "Failed to refresh APT package indexes. Check network and APT sources." "ERROR"
+        exit 1
+    fi
+}
+
+###############################################################################
 # FUNCTION: check_reboot_required
 # Description: Report whether Debian/DietPi has flagged the system for reboot.
 #              This is informational only; the script never reboots by itself.
@@ -479,10 +495,19 @@ preflight_pivpn() {
 ###############################################################################
 system_update_upgrade() {
     log "Running system update and upgrade."
+
     wait_for_apt
-    sudo apt-get update
+    if ! sudo apt-get update; then
+        log "System update failed. Check network and APT sources." "ERROR"
+        return 1
+    fi
+
     wait_for_apt
-    sudo apt-get dist-upgrade -y
+    if ! sudo apt-get dist-upgrade -y; then
+        log "System upgrade failed." "ERROR"
+        return 1
+    fi
+
     log "System update and upgrade completed successfully."
     check_reboot_required
 }
@@ -493,8 +518,12 @@ system_update_upgrade() {
 ###############################################################################
 dietpi_bullseye_to_bookworm() {
     log "DietPi upgrade: Bullseye -> Bookworm"
-    script -qec "sudo bash -c \"\$(curl -sSf 'https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-bookworm-upgrade')\"" /dev/null
-    log "DietPi upgrade Bullseye -> Bookworm finished."
+    if script -qec "sudo bash -c \"\$(curl -sSf 'https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-bookworm-upgrade')\"" /dev/null; then
+        log "DietPi upgrade Bullseye -> Bookworm finished."
+    else
+        log "DietPi upgrade Bullseye -> Bookworm failed or was cancelled." "ERROR"
+        return 1
+    fi
 }
 
 ###############################################################################
@@ -503,8 +532,12 @@ dietpi_bullseye_to_bookworm() {
 ###############################################################################
 dietpi_bookworm_to_trixie() {
     log "DietPi upgrade: Bookworm -> Trixie"
-    script -qec "sudo bash -c \"\$(curl -sSf 'https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-trixie-upgrade')\"" /dev/null
-    log "DietPi upgrade Bookworm -> Trixie finished."
+    if script -qec "sudo bash -c \"\$(curl -sSf 'https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-trixie-upgrade')\"" /dev/null; then
+        log "DietPi upgrade Bookworm -> Trixie finished."
+    else
+        log "DietPi upgrade Bookworm -> Trixie failed or was cancelled." "ERROR"
+        return 1
+    fi
 }
 
 ###############################################################################
@@ -841,16 +874,24 @@ install_configure_snmpd() {
 
     if ! dpkg -l | grep -q "^ii.*lm-sensors"; then
         wait_for_apt
-        sudo apt-get install -y lm-sensors
-        log "lm-sensors package installed successfully."
+        if sudo apt-get install -y lm-sensors; then
+            log "lm-sensors package installed successfully."
+        else
+            log "Failed to install lm-sensors." "ERROR"
+            return 1
+        fi
     else
         log "lm-sensors package is already installed. No changes needed."
     fi
 
     if ! dpkg -l | grep -q "^ii.*snmpd"; then
         wait_for_apt
-        sudo apt-get install -y snmpd
-        log "snmpd package installed successfully."
+        if sudo apt-get install -y snmpd; then
+            log "snmpd package installed successfully."
+        else
+            log "Failed to install snmpd." "ERROR"
+            return 1
+        fi
     else
         log "snmpd package is already installed. No changes needed."
     fi
@@ -903,25 +944,49 @@ install_docker_repository() {
     log "Installing Docker repository."
 
     wait_for_apt
-    sudo apt-get update
+    if ! sudo apt-get update; then
+        log "Failed to update package lists before Docker repository setup." "ERROR"
+        return 1
+    fi
+
     wait_for_apt
-    sudo apt-get install -y ca-certificates curl
+    if ! sudo apt-get install -y ca-certificates curl; then
+        log "Failed to install Docker repository prerequisites." "ERROR"
+        return 1
+    fi
 
-    sudo install -m 0755 -d /etc/apt/keyrings
+    if ! sudo install -m 0755 -d /etc/apt/keyrings; then
+        log "Failed to create /etc/apt/keyrings." "ERROR"
+        return 1
+    fi
 
-    sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    if ! sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc; then
+        log "Failed to download Docker GPG key." "ERROR"
+        return 1
+    fi
+
+    if ! sudo chmod a+r /etc/apt/keyrings/docker.asc; then
+        log "Failed to set permissions on Docker GPG key." "ERROR"
+        return 1
+    fi
 
     local distro_codename
     distro_codename="$(get_os_codename)"
 
-    echo \
+    if ! echo \
       "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
       ${distro_codename} stable" | \
-      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null; then
+        log "Failed to write Docker APT source list." "ERROR"
+        return 1
+    fi
 
     wait_for_apt
-    sudo apt-get update
+    if ! sudo apt-get update; then
+        log "Docker repository was written, but apt-get update failed." "ERROR"
+        return 1
+    fi
+
     log "Docker repository installed successfully."
 }
 
@@ -937,10 +1002,19 @@ install_pivpn() {
     local tmp
     tmp="$(mktemp)"
 
-    curl -fsSL https://install.pivpn.io -o "$tmp"
-    script -qec "sudo bash '$tmp'" /dev/null
-    rm -f "$tmp"
+    if ! curl -fsSL https://install.pivpn.io -o "$tmp"; then
+        rm -f "$tmp"
+        log "Failed to download PiVPN installer." "ERROR"
+        return 1
+    fi
 
+    if ! script -qec "sudo bash '$tmp'" /dev/null; then
+        rm -f "$tmp"
+        log "PiVPN installation failed or was cancelled." "ERROR"
+        return 1
+    fi
+
+    rm -f "$tmp"
     log "PiVPN installation completed."
 
     echo
@@ -980,14 +1054,17 @@ create_pivpn_clients() {
             log "Exists: $client"
         else
             log "Creating client: $client"
-            pivpn add -n "$client" -ip auto
+            if ! pivpn add -n "$client" -ip auto; then
+                log "Failed to create PiVPN client: $client" "WARN"
+            fi
         fi
     done
 
     echo
     read -rp "Show QR for ${HOST}-iph? [Y/n]: " qr < /dev/tty
     if [[ -z "$qr" || "$qr" =~ ^[Yy]$ ]]; then
-        pivpn -qr "${HOST}-iph" < /dev/tty > /dev/tty 2>/dev/tty
+        pivpn -qr "${HOST}-iph" < /dev/tty > /dev/tty 2>/dev/tty || \
+            log "Failed to display PiVPN QR code for ${HOST}-iph." "WARN"
     fi
 }
 
@@ -997,12 +1074,21 @@ create_pivpn_clients() {
 ###############################################################################
 install_docker_ce() {
     log "Installing Docker CE and related tools."
+
     wait_for_apt
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+    if ! sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
                            docker-buildx-plugin docker-compose-plugin \
-                           docker-ce-rootless-extras
-    sudo usermod -aG docker "$SUDO_USER"
-    log "Docker CE and tools installed successfully. User added to group 'docker'."
+                           docker-ce-rootless-extras; then
+        log "Docker CE installation failed. Ensure the Docker repository is installed first." "ERROR"
+        return 1
+    fi
+
+    if sudo usermod -aG docker "$SUDO_USER"; then
+        log "Docker CE and tools installed successfully. User added to group 'docker'."
+    else
+        log "Docker was installed, but adding user '$SUDO_USER' to group 'docker' failed." "WARN"
+        return 1
+    fi
 }
 
 ###############################################################################
@@ -1012,13 +1098,37 @@ install_docker_ce() {
 remove_docker_and_tools() {
     log "Removing Docker CE and related tools."
 
-    wait_for_apt
-    sudo apt-get purge -y docker-ce docker-ce-cli containerd.io \
-        docker-buildx-plugin docker-compose-plugin \
+    local docker_packages=(
+        docker-ce
+        docker-ce-cli
+        containerd.io
+        docker-buildx-plugin
+        docker-compose-plugin
         docker-ce-rootless-extras
+    )
+    local installed_packages=()
+    local package
+
+    # apt-get purge exits with an error when asked to remove package names that
+    # are unknown to the configured repositories. Build a purge list from packages
+    # that are actually installed so this action remains safe on hosts without Docker.
+    for package in "${docker_packages[@]}"; do
+        if dpkg-query -W -f='${db:Status-Abbrev}' "$package" 2>/dev/null | grep -q '^i'; then
+            installed_packages+=("$package")
+        fi
+    done
+
+    if [ "${#installed_packages[@]}" -gt 0 ]; then
+        wait_for_apt
+        sudo apt-get purge -y "${installed_packages[@]}"
+    else
+        log "No Docker packages are installed. Skipping package purge."
+    fi
 
     wait_for_apt
-    sudo apt-get autoremove -y
+    if ! sudo apt-get autoremove -y; then
+        log "apt-get autoremove failed during Docker cleanup; continuing with file/group cleanup." "WARN"
+    fi
 
     sudo rm -f /etc/apt/sources.list.d/docker.sources
     sudo rm -f /etc/apt/sources.list.d/docker.list
@@ -1748,8 +1858,11 @@ restore_from_backup() {
             ;;
         "/etc/snmp/snmpd.conf")
             if sudo systemctl is-active --quiet snmpd; then
-                sudo systemctl restart snmpd
-                log "snmpd restarted after restore."
+                if sudo systemctl restart snmpd; then
+                    log "snmpd restarted after restore."
+                else
+                    log "Failed to restart snmpd after restore." "WARN"
+                fi
             else
                 log "snmpd not active; restart manually if needed." "WARN"
             fi
@@ -2009,29 +2122,46 @@ configure_ufw() {
 
     if ! command -v ufw >/dev/null 2>&1; then
         wait_for_apt
-        sudo apt-get install -y ufw || {
+        if ! sudo apt-get install -y ufw; then
             log "Failed to install ufw." "ERROR"
             return 1
-        }
+        fi
     fi
 
     # Baseline rules are intentionally minimal. SSH is allowed before enabling
     # the firewall to avoid locking out the current administration session.
-    sudo ufw default deny incoming
-    sudo ufw default allow outgoing
-    sudo ufw allow OpenSSH || sudo ufw allow ssh
+    if ! sudo ufw default deny incoming; then
+        log "Failed to set UFW default incoming policy." "ERROR"
+        return 1
+    fi
+
+    if ! sudo ufw default allow outgoing; then
+        log "Failed to set UFW default outgoing policy." "ERROR"
+        return 1
+    fi
+
+    if ! sudo ufw allow OpenSSH; then
+        if ! sudo ufw allow ssh; then
+            log "Failed to add SSH allow rule to UFW." "ERROR"
+            return 1
+        fi
+    fi
 
     echo
     echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH."
     read -rp "Enable UFW now? [y/N]: " enable_ufw < /dev/tty
     if [[ "$enable_ufw" =~ ^[Yy]$ ]]; then
-        sudo ufw --force enable
-        log "UFW enabled."
+        if sudo ufw --force enable; then
+            log "UFW enabled."
+        else
+            log "Failed to enable UFW." "ERROR"
+            return 1
+        fi
     else
         log "UFW configured but not enabled." "WARN"
     fi
 
-    sudo ufw status verbose
+    sudo ufw status verbose || log "Could not read UFW status." "WARN"
 }
 
 ###############################################################################
@@ -2145,5 +2275,6 @@ menu() {
 log "hostctl execution started. Version: $SCRIPT_VERSION"
 select_profile
 apply_profile_config
+refresh_apt_package_lists
 install_missing_packages
 menu
