@@ -81,6 +81,26 @@ log() {
 }
 
 ###############################################################################
+# FUNCTION: run_menu_action
+# Description: Run an interactive menu action without letting set -e terminate
+#              the whole script on recoverable/action-level failures.
+###############################################################################
+run_menu_action() {
+    local label="$1"
+    shift
+
+    if "$@"; then
+        return 0
+    fi
+
+    local rc=$?
+    log "Menu action failed or was cancelled: $label (exit code: $rc). Returning to menu." "ERROR"
+    echo
+    read -rp "Press Enter to return to the menu..." _ < /dev/tty || true
+    return 0
+}
+
+###############################################################################
 # FUNCTION: wait_for_apt
 # Description: Wait for background apt/dpkg processes to release locks before
 #              running apt-get. This avoids failures when apt-daily or another
@@ -1075,18 +1095,70 @@ create_pivpn_clients() {
 install_docker_ce() {
     log "Installing Docker CE and related tools."
 
+    local docker_packages=(
+        docker-ce
+        docker-ce-cli
+        containerd.io
+        docker-buildx-plugin
+        docker-compose-plugin
+        docker-ce-rootless-extras
+    )
+
+    # Ensure package indexes are current and check whether Docker packages are
+    # actually available before running apt-get install. This avoids a hard menu
+    # exit when the Docker repository has not been added yet or apt sources are
+    # out of date.
     wait_for_apt
-    if ! sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
-                           docker-buildx-plugin docker-compose-plugin \
-                           docker-ce-rootless-extras; then
-        log "Docker CE installation failed. Ensure the Docker repository is installed first." "ERROR"
+    if ! sudo apt-get update; then
+        log "Failed to update package lists before Docker installation." "ERROR"
         return 1
     fi
 
-    if sudo usermod -aG docker "$SUDO_USER"; then
-        log "Docker CE and tools installed successfully. User added to group 'docker'."
+    local missing_candidates=()
+    local package
+    for package in "${docker_packages[@]}"; do
+        if ! apt-cache policy "$package" | awk '/Candidate:/ { exit ($2 == "(none)") ? 1 : 0 }'; then
+            missing_candidates+=("$package")
+        fi
+    done
+
+    if [ "${#missing_candidates[@]}" -gt 0 ]; then
+        log "Docker packages are not available from current APT sources: ${missing_candidates[*]}" "WARN"
+        log "Attempting to install/refresh the official Docker repository first."
+        if ! install_docker_repository; then
+            log "Docker repository setup failed. Docker CE installation skipped." "ERROR"
+            return 1
+        fi
+
+        missing_candidates=()
+        for package in "${docker_packages[@]}"; do
+            if ! apt-cache policy "$package" | awk '/Candidate:/ { exit ($2 == "(none)") ? 1 : 0 }'; then
+                missing_candidates+=("$package")
+            fi
+        done
+
+        if [ "${#missing_candidates[@]}" -gt 0 ]; then
+            log "Docker packages are still unavailable after repository setup: ${missing_candidates[*]}" "ERROR"
+            log "Check Debian/DietPi codename, architecture, network access, and Docker repository support." "ERROR"
+            return 1
+        fi
+    fi
+
+    wait_for_apt
+    if ! sudo apt-get install -y "${docker_packages[@]}"; then
+        log "Docker CE installation failed. Returning to menu." "ERROR"
+        return 1
+    fi
+
+    if getent group docker >/dev/null 2>&1; then
+        if sudo usermod -aG docker "$SUDO_USER"; then
+            log "Docker CE and tools installed successfully. User added to group 'docker'."
+        else
+            log "Docker was installed, but adding user '$SUDO_USER' to group 'docker' failed." "WARN"
+            return 1
+        fi
     else
-        log "Docker was installed, but adding user '$SUDO_USER' to group 'docker' failed." "WARN"
+        log "Docker installed, but group 'docker' was not found." "WARN"
         return 1
     fi
 }
@@ -2228,30 +2300,30 @@ menu() {
         read -rp "Enter your choice: " choice
 
         case "$choice" in
-            1) system_update_upgrade ;;
-            2) dietpi_bullseye_to_bookworm ;;
-            3) dietpi_bookworm_to_trixie ;;
-            4) update_sudoers ;;
-            5) configure_ssh ;;
-            6) generate_ssh_key ;;
-            7) create_bashrc ;;
-            8) create_bash_aliases ;;
-            9) install_configure_snmpd ;;
-            10) install_docker_repository ;;
-            11) install_pivpn ;;
-            12) install_docker_ce ;;
-            13) remove_docker_and_tools ;;
-            14) clone_fastfetch_repository ;;
-            15) run_all_tasks ;;
-            16) show_available_backups ;;
-            17) restore_from_backup ;;
-            18) run_health_check ;;
-            19) show_important_paths ;;
-            20) show_current_profile_config ;;
-            21) install_wakeonlan ;;
-            22) create_nas_backup_script ;;
-            23) configure_ufw ;;
-            24) check_reboot_required ;;
+            1) run_menu_action "System Update and Upgrade" system_update_upgrade ;;
+            2) run_menu_action "DietPi: Bullseye -> Bookworm" dietpi_bullseye_to_bookworm ;;
+            3) run_menu_action "DietPi: Bookworm -> Trixie" dietpi_bookworm_to_trixie ;;
+            4) run_menu_action "Update sudoers" update_sudoers ;;
+            5) run_menu_action "Configure SSH" configure_ssh ;;
+            6) run_menu_action "Generate SSH Key" generate_ssh_key ;;
+            7) run_menu_action "Create/Update .bashrc" create_bashrc ;;
+            8) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
+            9) run_menu_action "Install and Configure SNMPD" install_configure_snmpd ;;
+            10) run_menu_action "Install Docker official repo" install_docker_repository ;;
+            11) run_menu_action "Install PiVPN" install_pivpn ;;
+            12) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
+            13) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
+            14) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
+            15) run_menu_action "Run all tasks" run_all_tasks ;;
+            16) run_menu_action "Show available backups" show_available_backups ;;
+            17) run_menu_action "Restore from backup" restore_from_backup ;;
+            18) run_menu_action "Run health check" run_health_check ;;
+            19) run_menu_action "Show important paths" show_important_paths ;;
+            20) run_menu_action "Show current profile config" show_current_profile_config ;;
+            21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
+            22) run_menu_action "Create NAS backup script" create_nas_backup_script ;;
+            23) run_menu_action "Configure UFW firewall" configure_ufw ;;
+            24) run_menu_action "Check if reboot is required" check_reboot_required ;;
             25)
                 log "Script execution completed."
                 log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
