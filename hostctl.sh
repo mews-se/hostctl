@@ -1012,9 +1012,13 @@ install_docker_ce() {
 remove_docker_and_tools() {
     log "Removing Docker CE and related tools."
 
-    sudo apt purge -y docker-ce docker-ce-cli containerd.io \
+    wait_for_apt
+    sudo apt-get purge -y docker-ce docker-ce-cli containerd.io \
         docker-buildx-plugin docker-compose-plugin \
         docker-ce-rootless-extras
+
+    wait_for_apt
+    sudo apt-get autoremove -y
 
     sudo rm -f /etc/apt/sources.list.d/docker.sources
     sudo rm -f /etc/apt/sources.list.d/docker.list
@@ -1023,7 +1027,35 @@ remove_docker_and_tools() {
     sudo rm -rf /var/lib/docker
     sudo rm -rf /var/lib/containerd
 
-    log "Docker packages, repository configuration, and data directories removed."
+    # Remove all supplementary users from the docker group before deleting it.
+    # This does not delete user accounts; it only removes docker group membership.
+    if getent group docker >/dev/null 2>&1; then
+        local docker_members
+        docker_members="$(getent group docker | awk -F: '{print $4}')"
+
+        if [ -n "$docker_members" ]; then
+            IFS=',' read -ra members <<< "$docker_members"
+            for member in "${members[@]}"; do
+                if [ -n "$member" ]; then
+                    if sudo gpasswd -d "$member" docker >/dev/null 2>&1; then
+                        log "Removed user '$member' from docker group."
+                    else
+                        log "Could not remove user '$member' from docker group." "WARN"
+                    fi
+                fi
+            done
+        fi
+
+        if sudo groupdel docker >/dev/null 2>&1; then
+            log "Removed docker group."
+        else
+            log "Could not remove docker group. It may be a primary group for one or more users." "WARN"
+        fi
+    else
+        log "Docker group does not exist. No group cleanup needed."
+    fi
+
+    log "Docker packages, group memberships, repository configuration, and data directories removed."
 }
 
 ###############################################################################
