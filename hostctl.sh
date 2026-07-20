@@ -47,16 +47,32 @@ trap 'echo "Script interrupted. Exiting..."; exit 1' SIGINT SIGTERM
 ###############################################################################
 # Validate environment: SUDO_USER must be set
 ###############################################################################
+if [ "${EUID}" -ne 0 ]; then
+    echo "Error: This script must be run as root. Please use sudo." >&2
+    exit 1
+fi
+
 if [ -z "${SUDO_USER:-}" ]; then
     echo "Error: SUDO_USER is not set. Please run this script with sudo." >&2
+    exit 1
+fi
+
+if ! id "$SUDO_USER" >/dev/null 2>&1; then
+    echo "Error: SUDO_USER does not identify a local account: $SUDO_USER" >&2
+    exit 1
+fi
+
+USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
+    echo "Error: Could not resolve a valid home directory for $SUDO_USER." >&2
     exit 1
 fi
 
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.01"
-LOG_FILE="/home/$SUDO_USER/hostctl.log"
+SCRIPT_VERSION="v2026.07.20"
+LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
 # FUNCTION: log
@@ -74,10 +90,18 @@ log() {
         echo "$line"
     fi
 
-    touch "$LOG_FILE" 2>/dev/null || true
-    chown "$SUDO_USER:$SUDO_USER" "$LOG_FILE" 2>/dev/null || true
-    chmod 644 "$LOG_FILE" 2>/dev/null || true
-    echo "$line" >> "$LOG_FILE" 2>/dev/null || true
+    # The log belongs in the invoking user's home and is always created and
+    # appended as that user. This prevents a user-controlled path from
+    # redirecting privileged root writes through a symbolic link.
+    if [ -L "$LOG_FILE" ] || { [ -e "$LOG_FILE" ] && [ ! -f "$LOG_FILE" ]; }; then
+        echo "Refusing to write hostctl log through a symbolic link: $LOG_FILE" >&2
+        return 0
+    fi
+
+    if [ ! -e "$LOG_FILE" ]; then
+        sudo -u "$SUDO_USER" install -m 0644 /dev/null "$LOG_FILE" 2>/dev/null || return 0
+    fi
+    printf '%s\n' "$line" | sudo -u "$SUDO_USER" tee -a "$LOG_FILE" >/dev/null 2>&1 || true
 }
 
 ###############################################################################
@@ -87,16 +111,26 @@ log() {
 ###############################################################################
 run_menu_action() {
     local label="$1"
+    local rc
     shift
 
-    if "$@"; then
+    # A function invoked directly as an `if` condition runs with errexit
+    # suppressed throughout its body. Run the action in a subshell instead:
+    # errexit remains effective there, while this wrapper can safely capture
+    # the action's status and return control to the menu.
+    set +e
+    (
+        set -euo pipefail
+        "$@"
+    )
+    rc=$?
+    set -e
+
+    if [ "$rc" -eq 0 ]; then
         return 0
     fi
 
-    local rc=$?
     log "Menu action failed or was cancelled: $label (exit code: $rc). Returning to menu." "ERROR"
-    echo
-    read -rp "Press Enter to return to the menu..." _ < /dev/tty || true
     return 0
 }
 
@@ -170,9 +204,11 @@ backup_file() {
         return 1
     fi
 
-    backup_file="${target_file}.bak_$(date +%F_%T)"
-    sudo cp "$target_file" "$backup_file"
-    echo "$backup_file"
+    backup_file="${target_file}.bak_$(date +%F_%H-%M-%S)"
+    if ! sudo cp --preserve=mode,ownership,timestamps "$target_file" "$backup_file"; then
+        return 1
+    fi
+    printf '%s\n' "$backup_file"
 }
 
 ###############################################################################
@@ -233,10 +269,14 @@ restart_ssh_service() {
 
     if sudo systemctl is-enabled "$service_name" >/dev/null 2>&1 ||
        sudo systemctl is-active --quiet "$service_name"; then
-        sudo systemctl restart "$service_name"
+        if ! sudo systemctl restart "$service_name"; then
+            log "Failed to restart SSH service '$service_name'." "ERROR"
+            return 1
+        fi
         log "SSH service '$service_name' restarted successfully."
     else
         log "SSH service '$service_name' is not active/enabled. Restart manually if needed." "WARN"
+        return 1
     fi
 }
 
@@ -533,12 +573,72 @@ system_update_upgrade() {
 }
 
 ###############################################################################
+# FUNCTION: run_remote_root_script
+# Description: Download a remote installer to a temporary file, validate Bash
+#              syntax, show its digest, and require confirmation before running.
+###############################################################################
+run_remote_root_script() {
+    local label="$1"
+    local url="$2"
+    local tmp
+    local digest
+    local response
+    local quoted_tmp
+
+    tmp="$(mktemp)"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$tmp"; then
+        rm -f "$tmp"
+        log "Failed to download $label." "ERROR"
+        return 1
+    fi
+
+    if ! bash -n "$tmp"; then
+        rm -f "$tmp"
+        log "Downloaded $label script failed Bash syntax validation." "ERROR"
+        return 1
+    fi
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest="$(sha256sum "$tmp" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        digest="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+    else
+        rm -f "$tmp"
+        log "No SHA-256 utility is available to inspect $label." "ERROR"
+        return 1
+    fi
+
+    echo
+    echo "$label was downloaded from:"
+    echo "  $url"
+    echo "SHA-256:"
+    echo "  $digest"
+    read -rp "Run this downloaded script as root? [y/N]: " response < /dev/tty
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        rm -f "$tmp"
+        log "$label cancelled before execution."
+        return 1
+    fi
+
+    printf -v quoted_tmp '%q' "$tmp"
+    if ! script -qec "bash $quoted_tmp" /dev/null; then
+        rm -f "$tmp"
+        log "$label failed or was cancelled." "ERROR"
+        return 1
+    fi
+
+    rm -f "$tmp"
+}
+
+###############################################################################
 # FUNCTION: dietpi_bullseye_to_bookworm
 # Description: Run DietPi Bullseye -> Bookworm upgrade in a PTY
 ###############################################################################
 dietpi_bullseye_to_bookworm() {
     log "DietPi upgrade: Bullseye -> Bookworm"
-    if script -qec "sudo bash -c \"\$(curl -sSf 'https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-bookworm-upgrade')\"" /dev/null; then
+    if run_remote_root_script \
+        "DietPi Bullseye -> Bookworm upgrade" \
+        "https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-bookworm-upgrade"; then
         log "DietPi upgrade Bullseye -> Bookworm finished."
     else
         log "DietPi upgrade Bullseye -> Bookworm failed or was cancelled." "ERROR"
@@ -552,7 +652,9 @@ dietpi_bullseye_to_bookworm() {
 ###############################################################################
 dietpi_bookworm_to_trixie() {
     log "DietPi upgrade: Bookworm -> Trixie"
-    if script -qec "sudo bash -c \"\$(curl -sSf 'https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-trixie-upgrade')\"" /dev/null; then
+    if run_remote_root_script \
+        "DietPi Bookworm -> Trixie upgrade" \
+        "https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-trixie-upgrade"; then
         log "DietPi upgrade Bookworm -> Trixie finished."
     else
         log "DietPi upgrade Bookworm -> Trixie failed or was cancelled." "ERROR"
@@ -569,21 +671,49 @@ update_sudoers() {
 
     local sudoers_dropin="/etc/sudoers.d/99-sudo-nopasswd"
     local sudoers_content="%sudo ALL=(ALL) NOPASSWD: ALL"
+    local sudoers_tmp
+    local backup_path=""
 
-    if [ -f "$sudoers_dropin" ]; then
-        backup_file "$sudoers_dropin" >/dev/null || true
-    fi
-
-    printf '%s\n' "$sudoers_content" | sudo tee "$sudoers_dropin" > /dev/null
-    sudo chmod 440 "$sudoers_dropin"
-
-    if sudo visudo -cf /etc/sudoers >/dev/null 2>&1; then
-        log "sudoers drop-in updated successfully at $sudoers_dropin."
-    else
-        sudo rm -f "$sudoers_dropin"
-        log "visudo validation failed. Removed invalid sudoers drop-in." "ERROR"
+    sudoers_tmp="$(sudo mktemp /etc/sudoers.d/.hostctl-sudoers.XXXXXX)"
+    if ! printf '%s\n' "$sudoers_content" | sudo tee "$sudoers_tmp" >/dev/null; then
+        sudo rm -f "$sudoers_tmp"
+        log "Failed to write temporary sudoers file." "ERROR"
         return 1
     fi
+    sudo chmod 0440 "$sudoers_tmp"
+
+    if ! sudo visudo -cf "$sudoers_tmp" >/dev/null 2>&1; then
+        sudo rm -f "$sudoers_tmp"
+        log "Temporary sudoers file failed validation; existing configuration was not changed." "ERROR"
+        return 1
+    fi
+
+    if [ -f "$sudoers_dropin" ]; then
+        backup_path="$(backup_file "$sudoers_dropin")" || {
+            sudo rm -f "$sudoers_tmp"
+            log "Could not back up the existing sudoers drop-in." "ERROR"
+            return 1
+        }
+    fi
+
+    if ! sudo install -o root -g root -m 0440 "$sudoers_tmp" "$sudoers_dropin"; then
+        sudo rm -f "$sudoers_tmp"
+        log "Failed to install sudoers drop-in." "ERROR"
+        return 1
+    fi
+    sudo rm -f "$sudoers_tmp"
+
+    if ! sudo visudo -cf /etc/sudoers >/dev/null 2>&1; then
+        if [ -n "$backup_path" ] && [ -f "$backup_path" ]; then
+            sudo cp --preserve=mode,ownership,timestamps "$backup_path" "$sudoers_dropin"
+        else
+            sudo rm -f "$sudoers_dropin"
+        fi
+        log "Full sudoers validation failed; the previous state was restored." "ERROR"
+        return 1
+    fi
+
+    log "sudoers drop-in updated successfully at $sudoers_dropin."
 }
 
 ###############################################################################
@@ -597,50 +727,91 @@ configure_ssh() {
 
     log "Configuring SSH."
     local sshd_config="/etc/ssh/sshd_config"
+    local sshd_tmp
     local allow_users
     local backup_path=""
+    local effective_ssh_config
+    local expected_user
     allow_users="$(get_allowed_ssh_users)"
 
-    # Keep a point-in-time backup so SSH hardening can be rolled back if the
-    # resulting config is invalid or the service cannot restart.
-    backup_path="$(backup_file "$sshd_config" 2>/dev/null || true)"
-    if [ -n "$backup_path" ]; then
-        log "SSH config backup created: $backup_path"
+    sshd_tmp="$(sudo mktemp /etc/ssh/.hostctl-sshd_config.XXXXXX)"
+    if ! sudo awk -v allow_users="$allow_users" '
+        function emit_hostctl_settings() {
+            print "PermitRootLogin no"
+            if (allow_users != "") {
+                print "AllowUsers " allow_users
+            }
+            inserted = 1
+        }
+
+        BEGIN { inserted = 0 }
+
+        !inserted && /^[[:space:]]*Match([[:space:]]|$)/ {
+            emit_hostctl_settings()
+        }
+
+        !inserted && /^[#[:space:]]*(PermitRootLogin|AllowUsers)[[:space:]]+/ {
+            next
+        }
+
+        { print }
+
+        END {
+            if (!inserted) {
+                emit_hostctl_settings()
+            }
+        }
+    ' "$sshd_config" | sudo tee "$sshd_tmp" >/dev/null; then
+        sudo rm -f "$sshd_tmp"
+        log "Failed to create temporary SSH configuration." "ERROR"
+        return 1
     fi
 
     rollback_ssh_config() {
         if [ -n "$backup_path" ] && [ -f "$backup_path" ]; then
-            sudo cp "$backup_path" "$sshd_config"
+            sudo cp --preserve=mode,ownership,timestamps "$backup_path" "$sshd_config"
             log "Rolled back SSH config from: $backup_path" "WARN"
         else
             log "No SSH backup available for rollback." "ERROR"
         fi
     }
 
-    sudo sed -E -i 's/^[#[:space:]]*PermitRootLogin[[:space:]]+.*/PermitRootLogin no/' "$sshd_config"
-    if ! sudo grep -Eq '^[[:space:]]*PermitRootLogin[[:space:]]+' "$sshd_config"; then
-        printf '%s\n' 'PermitRootLogin no' | sudo tee -a "$sshd_config" > /dev/null
-    fi
-    log "PermitRootLogin set to no."
-
-    if [ -n "$allow_users" ]; then
-        if sudo grep -Eq '^[#[:space:]]*AllowUsers[[:space:]]+' "$sshd_config"; then
-            sudo sed -E -i "s|^[#[:space:]]*AllowUsers[[:space:]]+.*|AllowUsers $allow_users|" "$sshd_config"
-        else
-            printf '%s\n' "AllowUsers $allow_users" | sudo tee -a "$sshd_config" > /dev/null
-        fi
-        log "AllowUsers set to: $allow_users"
-    else
-        log "No valid local users found for AllowUsers. Skipping AllowUsers update." "WARN"
-    fi
-
-    # Validate before restarting so a broken SSH config is never applied.
-    if ! sudo sshd -t -f "$sshd_config"; then
-        log "sshd_config validation failed. Rolling back." "ERROR"
-        rollback_ssh_config
-        sudo sshd -t -f "$sshd_config" >/dev/null 2>&1 || log "Rolled back SSH config still fails validation. Manual intervention required." "ERROR"
+    # Validate the candidate before replacing the live file.
+    if ! sudo sshd -t -f "$sshd_tmp"; then
+        sudo rm -f "$sshd_tmp"
+        log "Candidate sshd_config failed validation; existing configuration was not changed." "ERROR"
         return 1
     fi
+
+    # Syntax validation alone cannot detect an earlier value from an Include.
+    # Confirm that the effective configuration contains the intended settings.
+    effective_ssh_config="$(sudo sshd -T -f "$sshd_tmp")"
+    if ! grep -q '^permitrootlogin no$' <<< "$effective_ssh_config"; then
+        sudo rm -f "$sshd_tmp"
+        log "Candidate SSH configuration does not effectively disable root login." "ERROR"
+        return 1
+    fi
+    for expected_user in $allow_users; do
+        if ! grep -Eq "^allowusers[[:space:]].*(^|[[:space:]])${expected_user}([[:space:]]|$)" <<< "$effective_ssh_config"; then
+            sudo rm -f "$sshd_tmp"
+            log "Candidate SSH configuration is missing expected AllowUsers account: $expected_user" "ERROR"
+            return 1
+        fi
+    done
+
+    backup_path="$(backup_file "$sshd_config")" || {
+        sudo rm -f "$sshd_tmp"
+        log "Failed to back up the existing SSH configuration." "ERROR"
+        return 1
+    }
+    log "SSH config backup created: $backup_path"
+
+    if ! sudo install -o root -g root -m 0644 "$sshd_tmp" "$sshd_config"; then
+        sudo rm -f "$sshd_tmp"
+        log "Failed to install validated SSH configuration." "ERROR"
+        return 1
+    fi
+    sudo rm -f "$sshd_tmp"
 
     # If restart fails despite a valid config, restore the previous known-good
     # file and try to bring SSH back with that version.
@@ -660,7 +831,7 @@ configure_ssh() {
 generate_ssh_key() {
     log "Generating SSH key."
 
-    local SSH_DIR="/home/$SUDO_USER/.ssh"
+    local SSH_DIR="$USER_HOME/.ssh"
     local KEY_FILE="$SSH_DIR/id_ed25519"
 
     if [ -f "$KEY_FILE" ]; then
@@ -685,17 +856,22 @@ generate_ssh_key() {
 create_bashrc() {
     log "Creating/updating .bashrc file."
 
-    local BASHRC_FILE="/home/$SUDO_USER/.bashrc"
-
-    if [ -f "$BASHRC_FILE" ]; then
-        sudo -u "$SUDO_USER" cp "$BASHRC_FILE" "${BASHRC_FILE}.bak_$(date +%F_%T)"
-        sudo -u "$SUDO_USER" rm "$BASHRC_FILE"
-        log "Removed existing .bashrc file (backup created)."
-    fi
+    local BASHRC_FILE="$USER_HOME/.bashrc"
+    local BASHRC_TEMP
 
     sudo -u "$SUDO_USER" mkdir -p "$(dirname "$BASHRC_FILE")"
+    BASHRC_TEMP="$(sudo -u "$SUDO_USER" mktemp "$USER_HOME/.bashrc.tmp.XXXXXX")"
 
-    cat <<'EOL' | sudo -u "$SUDO_USER" tee -a "$BASHRC_FILE" > /dev/null
+    if [ -f "$BASHRC_FILE" ]; then
+        if ! backup_file "$BASHRC_FILE" >/dev/null; then
+            sudo rm -f "$BASHRC_TEMP"
+            log "Failed to back up the existing .bashrc." "ERROR"
+            return 1
+        fi
+        log "Existing .bashrc backup created."
+    fi
+
+    if ! cat <<'EOL' | sudo -u "$SUDO_USER" tee "$BASHRC_TEMP" > /dev/null
 case $- in
     *i*) ;;
     *) return;;
@@ -752,6 +928,17 @@ if [ -f ~/.bash_aliases ]; then
     source ~/.bash_aliases
 fi
 EOL
+    then
+        sudo rm -f "$BASHRC_TEMP"
+        log "Failed to write the new .bashrc." "ERROR"
+        return 1
+    fi
+
+    if ! sudo -u "$SUDO_USER" mv "$BASHRC_TEMP" "$BASHRC_FILE"; then
+        sudo rm -f "$BASHRC_TEMP"
+        log "Failed to install the new .bashrc." "ERROR"
+        return 1
+    fi
 
     log ".bashrc file created/updated successfully for user: $SUDO_USER."
 }
@@ -763,13 +950,12 @@ EOL
 create_bash_aliases() {
     log "Creating/updating .bash_aliases file with interactive review."
 
-    local USER_HOME="/home/$SUDO_USER"
     local ALIASES_FILE="$USER_HOME/.bash_aliases"
     local BACKUP_FILE
     local TEMP_FILE
 
-    BACKUP_FILE="$ALIASES_FILE.bak_$(date +%F_%T)"
-    TEMP_FILE=$(sudo -u "$SUDO_USER" mktemp "$USER_HOME/.bash_aliases.tmp.XXXXXX")
+    BACKUP_FILE="$ALIASES_FILE.bak_$(date +%F_%H-%M-%S)"
+    TEMP_FILE="$(sudo -u "$SUDO_USER" mktemp "$USER_HOME/.bash_aliases.tmp.XXXXXX")"
 
     local RED GREEN YELLOW CYAN NC
     RED='\033[0;31m'
@@ -917,10 +1103,9 @@ install_configure_snmpd() {
     fi
 
     local SNMPD_CONF_FILE="/etc/snmp/snmpd.conf"
-    if [ -f "$SNMPD_CONF_FILE" ]; then
-        sudo cp "$SNMPD_CONF_FILE" "${SNMPD_CONF_FILE}.bak_$(date +%F_%T)"
-        log "Existing snmpd.conf backed up."
-    fi
+    local SNMPD_CONF_TMP
+    local SNMPD_BACKUP=""
+    SNMPD_CONF_TMP="$(sudo mktemp /etc/snmp/.hostctl-snmpd.XXXXXX)"
 
     local SNMPD_CONF_CONTENT
     SNMPD_CONF_CONTENT=$(cat <<EOF
@@ -940,14 +1125,40 @@ ${SNMP_HARDWARE_EXTENDS}
 EOF
 )
 
-    echo "$SNMPD_CONF_CONTENT" | sudo tee "$SNMPD_CONF_FILE" > /dev/null
+    if ! printf '%s\n' "$SNMPD_CONF_CONTENT" | sudo tee "$SNMPD_CONF_TMP" >/dev/null; then
+        sudo rm -f "$SNMPD_CONF_TMP"
+        log "Failed to write temporary SNMPD configuration." "ERROR"
+        return 1
+    fi
+    sudo chown root:root "$SNMPD_CONF_TMP"
+    sudo chmod 0600 "$SNMPD_CONF_TMP"
+
+    if [ -f "$SNMPD_CONF_FILE" ]; then
+        SNMPD_BACKUP="$(backup_file "$SNMPD_CONF_FILE")" || {
+            sudo rm -f "$SNMPD_CONF_TMP"
+            log "Failed to back up existing snmpd.conf." "ERROR"
+            return 1
+        }
+        log "Existing snmpd.conf backed up to $SNMPD_BACKUP."
+    fi
+
+    if ! sudo install -o root -g root -m 0600 "$SNMPD_CONF_TMP" "$SNMPD_CONF_FILE"; then
+        sudo rm -f "$SNMPD_CONF_TMP"
+        log "Failed to install SNMPD configuration." "ERROR"
+        return 1
+    fi
+    sudo rm -f "$SNMPD_CONF_TMP"
     log "snmpd.conf file created/overwritten successfully at $SNMPD_CONF_FILE."
 
-    sudo chown root:root "$SNMPD_CONF_FILE"
-    log "Ownership of $SNMPD_CONF_FILE set to root:root."
-
     if sudo systemctl is-active --quiet snmpd; then
-        sudo systemctl reload snmpd
+        if ! sudo systemctl reload snmpd; then
+            if [ -n "$SNMPD_BACKUP" ] && [ -f "$SNMPD_BACKUP" ]; then
+                sudo cp --preserve=mode,ownership,timestamps "$SNMPD_BACKUP" "$SNMPD_CONF_FILE"
+                sudo systemctl restart snmpd || true
+            fi
+            log "SNMPD reload failed; previous configuration restored." "ERROR"
+            return 1
+        fi
         log "SNMPD service reloaded successfully."
     else
         log "SNMPD service is not active; start/restart manually if needed." "WARN"
@@ -1019,22 +1230,11 @@ install_pivpn() {
 
     log "Installing PiVPN."
 
-    local tmp
-    tmp="$(mktemp)"
-
-    if ! curl -fsSL https://install.pivpn.io -o "$tmp"; then
-        rm -f "$tmp"
-        log "Failed to download PiVPN installer." "ERROR"
-        return 1
-    fi
-
-    if ! script -qec "sudo bash '$tmp'" /dev/null; then
-        rm -f "$tmp"
+    if ! run_remote_root_script "PiVPN installer" "https://install.pivpn.io"; then
         log "PiVPN installation failed or was cancelled." "ERROR"
         return 1
     fi
 
-    rm -f "$tmp"
     log "PiVPN installation completed."
 
     echo
@@ -1170,6 +1370,18 @@ install_docker_ce() {
 remove_docker_and_tools() {
     log "Removing Docker CE and related tools."
 
+    local confirmation
+    echo
+    echo "WARNING: This permanently removes Docker packages and deletes:"
+    echo "  /var/lib/docker"
+    echo "  /var/lib/containerd"
+    echo "This includes local containers, images, volumes, and build data."
+    read -rp "Type REMOVE to continue: " confirmation < /dev/tty
+    if [ "$confirmation" != "REMOVE" ]; then
+        log "Docker removal cancelled."
+        return 0
+    fi
+
     local docker_packages=(
         docker-ce
         docker-ce-cli
@@ -1192,7 +1404,10 @@ remove_docker_and_tools() {
 
     if [ "${#installed_packages[@]}" -gt 0 ]; then
         wait_for_apt
-        sudo apt-get purge -y "${installed_packages[@]}"
+        if ! sudo apt-get purge -y "${installed_packages[@]}"; then
+            log "Docker package purge failed; data directories were not removed." "ERROR"
+            return 1
+        fi
     else
         log "No Docker packages are installed. Skipping package purge."
     fi
@@ -1202,12 +1417,12 @@ remove_docker_and_tools() {
         log "apt-get autoremove failed during Docker cleanup; continuing with file/group cleanup." "WARN"
     fi
 
-    sudo rm -f /etc/apt/sources.list.d/docker.sources
-    sudo rm -f /etc/apt/sources.list.d/docker.list
-    sudo rm -f /etc/apt/keyrings/docker.asc
+    sudo rm -f -- /etc/apt/sources.list.d/docker.sources
+    sudo rm -f -- /etc/apt/sources.list.d/docker.list
+    sudo rm -f -- /etc/apt/keyrings/docker.asc
 
-    sudo rm -rf /var/lib/docker
-    sudo rm -rf /var/lib/containerd
+    sudo rm -rf --one-file-system -- /var/lib/docker
+    sudo rm -rf --one-file-system -- /var/lib/containerd
 
     # Remove all supplementary users from the docker group before deleting it.
     # This does not delete user accounts; it only removes docker group membership.
@@ -1278,12 +1493,13 @@ create_nas_backup_script() {
 
     local invoking_user
     local backup_script
+    local backup_script_tmp
     local credentials_file="/root/.nas-credentials"
     local nas_username=""
     local nas_password=""
 
     invoking_user="${SUDO_USER:-$(id -un)}"
-    backup_script="/home/$invoking_user/nas-backup.sh"
+    backup_script="$USER_HOME/nas-backup.sh"
 
     if [ ! -f "$credentials_file" ]; then
         echo
@@ -1305,7 +1521,8 @@ create_nas_backup_script() {
         log "Credentials file already exists at $credentials_file"
     fi
 
-    cat > "$backup_script" <<'EOF'
+    backup_script_tmp="$(sudo -u "$invoking_user" mktemp "$USER_HOME/.nas-backup.sh.tmp.XXXXXX")"
+    cat > "$backup_script_tmp" <<'EOF'
 #!/usr/bin/env bash
 #
 # nas-backup.sh
@@ -1334,6 +1551,10 @@ CREDENTIALS_FILE="/root/.nas-credentials"
 HOST_NAME="$(hostname -s)"
 LOCK_FILE="/var/run/nas-backup.lock"
 EXCLUDES_FILE=""
+LOCK_HELD=0
+NAS_MOUNTED_BY_US=0
+DIETPI_SERVICES_STOPPED=0
+declare -a STOPPED_SERVICES=()
 
 # -----------------------------------------------------------------------------
 # User / log path resolution
@@ -1383,7 +1604,8 @@ timestamp() {
 
 log() {
     local message="$1"
-    local line="[$(timestamp)] $message"
+    local line
+    line="[$(timestamp)] $message"
     printf '%s\n' "$line" | tee -a "$LOCAL_LOG"
 }
 
@@ -1404,22 +1626,35 @@ prepare_log_file() {
 
 cleanup() {
     local rc=$?
+    local service_name
 
-    if [ "${DIETPI_SERVICES_STOPPED:-0}" -eq 1 ] && [ -x /boot/dietpi/dietpi-services ]; then
-        /boot/dietpi/dietpi-services start || true
-    fi
+    # Prevent signal handling or the explicit exit below from invoking cleanup
+    # more than once.
+    trap - EXIT INT TERM
 
-    if mountpoint -q "$NAS_MOUNT_POINT"; then
+    if [ "${NAS_MOUNTED_BY_US:-0}" -eq 1 ] && mountpoint -q "$NAS_MOUNT_POINT"; then
         log "Unmounting NAS share: $NAS_MOUNT_POINT"
         umount "$NAS_MOUNT_POINT" || log "Warning: failed to unmount $NAS_MOUNT_POINT"
+    fi
+
+    if [ "${DIETPI_SERVICES_STOPPED:-0}" -eq 1 ] && [ -x /boot/dietpi/dietpi-services ]; then
+        /boot/dietpi/dietpi-services start || log "Warning: failed to restart DietPi services"
+    else
+        for service_name in "${STOPPED_SERVICES[@]:-}"; do
+            if [ -n "$service_name" ]; then
+                systemctl start "$service_name" ||
+                    log "Warning: failed to restart service: $service_name"
+            fi
+        done
     fi
 
     if [[ -n "${EXCLUDES_FILE:-}" && -f "${EXCLUDES_FILE}" ]]; then
         rm -f "$EXCLUDES_FILE"
     fi
 
-    if [[ -f "$LOCK_FILE" ]]; then
-        rm -f "$LOCK_FILE"
+    if [ "${LOCK_HELD:-0}" -eq 1 ]; then
+        flock -u 9 2>/dev/null || true
+        exec 9>&-
     fi
 
     if (( rc == 0 )); then
@@ -1436,15 +1671,17 @@ cleanup() {
 }
 
 acquire_lock() {
-    if [[ -e "$LOCK_FILE" ]]; then
-        log "Another backup appears to be running: $LOCK_FILE exists"
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        log "Another backup is already running."
         exit 1
     fi
-    touch "$LOCK_FILE"
+    LOCK_HELD=1
 }
 
-DIETPI_SERVICES_STOPPED=0
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # -----------------------------------------------------------------------------
 # Validation
@@ -1459,7 +1696,7 @@ require_root() {
 }
 
 check_requirements() {
-    local cmds=(mount umount mountpoint rsync hostname awk grep tee mktemp getent cut apt-get)
+    local cmds=(mount mount.cifs umount mountpoint findmnt flock rsync hostname awk grep tee mktemp getent cut apt-get systemctl)
     local cmd
 
     for cmd in "${cmds[@]}"; do
@@ -1484,17 +1721,27 @@ check_requirements() {
 stop_services() {
     if [ -x /boot/dietpi/dietpi-services ]; then
         log "Stopping DietPi services for backup consistency."
-        /boot/dietpi/dietpi-services stop || true
-        DIETPI_SERVICES_STOPPED=1
+        if /boot/dietpi/dietpi-services stop; then
+            DIETPI_SERVICES_STOPPED=1
+        else
+            log "Failed to stop DietPi services."
+            return 1
+        fi
         return 0
     fi
 
     log "Stopping selected services before backup"
-    systemctl stop cron 2>/dev/null || true
-    systemctl stop crond 2>/dev/null || true
-    systemctl stop snmpd 2>/dev/null || true
-    systemctl stop docker 2>/dev/null || true
-    systemctl stop containerd 2>/dev/null || true
+    local service_name
+    for service_name in cron crond snmpd docker containerd; do
+        if systemctl is-active --quiet "$service_name"; then
+            if systemctl stop "$service_name"; then
+                STOPPED_SERVICES+=("$service_name")
+            else
+                log "Failed to stop active service: $service_name"
+                return 1
+            fi
+        fi
+    done
 }
 
 # -----------------------------------------------------------------------------
@@ -1507,12 +1754,19 @@ ensure_mountpoint() {
 
 mount_nas() {
     if mountpoint -q "$NAS_MOUNT_POINT"; then
-        log "NAS share already mounted at $NAS_MOUNT_POINT"
-        return 0
+        local mounted_source
+        mounted_source="$(findmnt -n -o SOURCE --target "$NAS_MOUNT_POINT")"
+        if [ "$mounted_source" = "//$NAS_HOST/$NAS_SHARE" ]; then
+            log "Expected NAS share is already mounted at $NAS_MOUNT_POINT"
+            return 0
+        fi
+        log "Refusing to use $NAS_MOUNT_POINT because it contains another mount: $mounted_source"
+        return 1
     fi
 
     log "Mounting //$NAS_HOST/$NAS_SHARE to $NAS_MOUNT_POINT"
     mount -t cifs "//$NAS_HOST/$NAS_SHARE" "$NAS_MOUNT_POINT" -o "$MOUNT_OPTS"
+    NAS_MOUNTED_BY_US=1
     log "NAS share mounted successfully"
 }
 
@@ -1602,14 +1856,22 @@ run_backup() {
 
 main() {
     require_root
-    check_requirements
     prepare_log_file
+    command -v apt-get >/dev/null 2>&1 || {
+        echo "Missing required command: apt-get" >&2
+        exit 1
+    }
+    command -v flock >/dev/null 2>&1 || {
+        echo "Missing required command: flock" >&2
+        exit 1
+    }
     acquire_lock
 
     log "Starting NAS backup script."
 
     apt-get update
     apt-get install -y cifs-utils rsync
+    check_requirements
 
     ensure_mountpoint
     mount_nas
@@ -1625,15 +1887,20 @@ main() {
 main "$@"
 EOF
 
-    chmod +x "$backup_script"
-    chown "$invoking_user:$invoking_user" "$backup_script"
+    chmod 0750 "$backup_script_tmp"
+    chown "$invoking_user:$invoking_user" "$backup_script_tmp"
+    if ! sudo -u "$invoking_user" mv "$backup_script_tmp" "$backup_script"; then
+        rm -f "$backup_script_tmp"
+        log "Failed to install NAS backup script at $backup_script" "ERROR"
+        return 1
+    fi
 
     log "NAS backup script created at $backup_script"
     echo
     echo "Created files:"
     echo "  Backup script: $backup_script"
     echo "  Credentials:   $credentials_file"
-    echo "  Local log:     /home/$invoking_user/nas-backup.log"
+    echo "  Local log:     $USER_HOME/nas-backup.log"
     echo
     echo "NAS layout will be:"
     echo "  //10.0.0.100/backup/dietpibackup/<short-hostname>/"
@@ -1663,7 +1930,7 @@ clone_fastfetch_repository() {
     log "Preparing update-fastfetch repository."
 
     local REPO_URL="https://github.com/mews-se/update-fastfetch.git"
-    local DEST_DIR="/home/$SUDO_USER/update-fastfetch"
+    local DEST_DIR="$USER_HOME/update-fastfetch"
     local SCRIPT_PATH="$DEST_DIR/updatefastfetch.sh"
 
     if [ -d "$DEST_DIR/.git" ]; then
@@ -1683,7 +1950,7 @@ clone_fastfetch_repository() {
         log "Repository cloned successfully to $DEST_DIR."
     fi
 
-    cat > "$SCRIPT_PATH" <<'EOF'
+    if ! cat <<'EOF' | sudo -u "$SUDO_USER" tee "$SCRIPT_PATH" >/dev/null
 #!/usr/bin/env bash
 #
 # updatefastfetch.sh
@@ -1748,11 +2015,11 @@ main() {
     require_cmd grep
     require_cmd cut
     require_cmd head
+    require_cmd mktemp
 
     local asset_name=""
     local release_url=""
     local temp_deb=""
-    local installer=""
 
     asset_name="$(detect_architecture)"
     log "Detected Fastfetch asset: $asset_name"
@@ -1765,8 +2032,8 @@ main() {
 
     log "Resolved release URL: $release_url"
 
-    temp_deb="/tmp/fastfetch_latest_${asset_name}"
-    rm -f "$temp_deb"
+    temp_deb="$(mktemp "${TMPDIR:-/tmp}/fastfetch_latest.XXXXXX.deb")"
+    trap 'rm -f "$temp_deb"' EXIT
 
     log "Downloading package to $temp_deb"
     curl -fL "$release_url" -o "$temp_deb"
@@ -1784,14 +2051,18 @@ main() {
     fi
 
     rm -f "$temp_deb"
+    trap - EXIT
     log "Fastfetch install/update complete"
 }
 
 main "$@"
 EOF
+    then
+        log "Failed to write $SCRIPT_PATH." "ERROR"
+        return 1
+    fi
 
-    chmod +x "$SCRIPT_PATH"
-    chown "$SUDO_USER:$SUDO_USER" "$SCRIPT_PATH"
+    sudo -u "$SUDO_USER" chmod 0750 "$SCRIPT_PATH"
 
     log "Consolidated updatefastfetch.sh written to $SCRIPT_PATH"
 }
@@ -1836,7 +2107,7 @@ summary_report() {
 show_available_backups() {
     log "Showing available backups."
 
-    local user_home="/home/$SUDO_USER"
+    local user_home="$USER_HOME"
 
     local files=(
         "/etc/sudoers.d/99-sudo-nopasswd"
@@ -1867,8 +2138,9 @@ show_available_backups() {
 restore_from_backup() {
     log "Restore from backup selected."
 
-    local user_home="/home/$SUDO_USER"
+    local user_home="$USER_HOME"
     local target_file latest_backup choice response
+    local current_backup=""
 
     echo "Select file to restore:"
     echo "  1) /etc/sudoers.d/99-sudo-nopasswd"
@@ -1912,28 +2184,69 @@ restore_from_backup() {
         return 0
     fi
 
+    # Validate security-sensitive backups before touching the live files.
+    case "$target_file" in
+        "/etc/sudoers.d/99-sudo-nopasswd")
+            if ! sudo visudo -cf "$latest_backup" >/dev/null 2>&1; then
+                log "Selected sudoers backup failed validation; nothing was changed." "ERROR"
+                return 1
+            fi
+            ;;
+        "/etc/ssh/sshd_config")
+            if ! sudo sshd -t -f "$latest_backup"; then
+                log "Selected SSH backup failed validation; nothing was changed." "ERROR"
+                return 1
+            fi
+            ;;
+    esac
+
+    if [ -f "$target_file" ]; then
+        current_backup="$(backup_file "$target_file")" || {
+            log "Could not preserve the current file before restore: $target_file" "ERROR"
+            return 1
+        }
+    fi
+
+    rollback_restored_file() {
+        if [ -n "$current_backup" ] && [ -f "$current_backup" ]; then
+            sudo cp --preserve=mode,ownership,timestamps "$current_backup" "$target_file"
+            log "Restore rolled back to the pre-restore file: $current_backup" "WARN"
+        fi
+    }
+
     if [[ "$target_file" == /etc/* ]]; then
-        sudo cp "$latest_backup" "$target_file"
+        sudo cp --preserve=mode,ownership,timestamps "$latest_backup" "$target_file"
     else
         sudo -u "$SUDO_USER" cp "$latest_backup" "$target_file"
     fi
 
     case "$target_file" in
-        "/etc/ssh/sshd_config")
-            if sudo sshd -t -f /etc/ssh/sshd_config; then
-                restart_ssh_service
-                log "SSH service restarted after restore."
-            else
-                log "Restored sshd_config failed validation. Review it before restarting SSH." "ERROR"
+        "/etc/sudoers.d/99-sudo-nopasswd")
+            if ! sudo visudo -cf /etc/sudoers >/dev/null 2>&1; then
+                rollback_restored_file
+                log "Full sudoers validation failed after restore; previous file restored." "ERROR"
                 return 1
             fi
+            ;;
+        "/etc/ssh/sshd_config")
+            if ! restart_ssh_service; then
+                rollback_restored_file
+                restart_ssh_service || log "SSH restart failed after restore rollback. Manual intervention required." "ERROR"
+                log "SSH restart failed after restore; previous file restored." "ERROR"
+                return 1
+            fi
+            log "SSH service restarted after restore."
             ;;
         "/etc/snmp/snmpd.conf")
             if sudo systemctl is-active --quiet snmpd; then
                 if sudo systemctl restart snmpd; then
                     log "snmpd restarted after restore."
                 else
-                    log "Failed to restart snmpd after restore." "WARN"
+                    rollback_restored_file
+                    sudo systemctl restart snmpd ||
+                        log "snmpd failed to restart after restore rollback. Manual intervention required." "ERROR"
+                    log "Failed to restart snmpd after restore; previous file restored." "ERROR"
+                    return 1
                 fi
             else
                 log "snmpd not active; restart manually if needed." "WARN"
@@ -1951,7 +2264,7 @@ restore_from_backup() {
 run_health_check() {
     log "Running health check."
 
-    local user_home="/home/$SUDO_USER"
+    local user_home="$USER_HOME"
     local ssh_key="$user_home/.ssh/id_ed25519"
     local ssh_pub="$user_home/.ssh/id_ed25519.pub"
 
@@ -2076,7 +2389,7 @@ run_health_check() {
 show_important_paths() {
     log "Showing important paths."
 
-    local user_home="/home/$SUDO_USER"
+    local user_home="$USER_HOME"
     local short_host
     short_host="$(hostname -s 2>/dev/null || hostname | cut -d. -f1)"
 
@@ -2327,7 +2640,7 @@ menu() {
             25)
                 log "Script execution completed."
                 log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
-                echo ". /home/$SUDO_USER/.bashrc && . /home/$SUDO_USER/.bash_aliases"
+                echo ". $USER_HOME/.bashrc && . $USER_HOME/.bash_aliases"
                 echo "Alternatively, log out and log back in to start a new shell session."
                 echo "Log file: $LOG_FILE"
                 exit 0
