@@ -71,7 +71,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.20"
+SCRIPT_VERSION="v2026.07.21"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -731,6 +731,7 @@ configure_ssh() {
     local allow_users
     local backup_path=""
     local effective_ssh_config
+    local effective_allow_users
     local expected_user
     allow_users="$(get_allowed_ssh_users)"
 
@@ -741,16 +742,29 @@ configure_ssh() {
             if (allow_users != "") {
                 print "AllowUsers " allow_users
             }
+            print ""
             inserted = 1
         }
 
-        BEGIN { inserted = 0 }
+        BEGIN {
+            inserted = 0
+            in_match = 0
+        }
 
-        !inserted && /^[[:space:]]*Match([[:space:]]|$)/ {
+        # Insert before the first active directive. On Debian this places the
+        # hostctl policy before Include, so an included drop-in cannot win by
+        # supplying an earlier value for PermitRootLogin or AllowUsers.
+        !inserted && $0 !~ /^[[:space:]]*(#|$)/ {
             emit_hostctl_settings()
         }
 
-        !inserted && /^[#[:space:]]*(PermitRootLogin|AllowUsers)[[:space:]]+/ {
+        /^[[:space:]]*Match([[:space:]]|$)/ {
+            in_match = 1
+        }
+
+        # Remove old global settings from the main file, but preserve values
+        # inside Match blocks where they may intentionally be connection-specific.
+        !in_match && /^[#[:space:]]*(PermitRootLogin|AllowUsers)[[:space:]]+/ {
             next
         }
 
@@ -791,8 +805,15 @@ configure_ssh() {
         log "Candidate SSH configuration does not effectively disable root login." "ERROR"
         return 1
     fi
+    effective_allow_users="$(
+        awk '$1 == "allowusers" {
+            for (field = 2; field <= NF; field++) {
+                print $field
+            }
+        }' <<< "$effective_ssh_config"
+    )"
     for expected_user in $allow_users; do
-        if ! grep -Eq "^allowusers[[:space:]].*(^|[[:space:]])${expected_user}([[:space:]]|$)" <<< "$effective_ssh_config"; then
+        if ! grep -Fqx -- "$expected_user" <<< "$effective_allow_users"; then
             sudo rm -f "$sshd_tmp"
             log "Candidate SSH configuration is missing expected AllowUsers account: $expected_user" "ERROR"
             return 1
