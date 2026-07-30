@@ -30,7 +30,6 @@
 #     - Important paths display
 #     - Profile configuration display
 #     - Wake-on-LAN tools
-#     - NAS backup script generator
 #     - Optional UFW configuration
 #     - Reboot-required detection
 #     - Logging to ~/hostctl.log
@@ -71,7 +70,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.21"
+SCRIPT_VERSION="v2026.07.30"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -148,12 +147,20 @@ wait_for_apt() {
     fi
 
     # Wait on the common apt/dpkg lock files used during update, install,
-    # upgrade, and package archive operations.
+    # upgrade, and package archive operations. Give up after max_wait seconds
+    # rather than looping forever on a stuck lock.
+    local waited=0
+    local max_wait=300
     while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
           sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
           sudo fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+        if [ "$waited" -ge "$max_wait" ]; then
+            log "Gave up waiting for apt/dpkg lock after ${max_wait}s. Investigate the stuck process manually." "ERROR"
+            return 1
+        fi
         log "Waiting for background apt/dpkg process to release lock..." "WARN"
         sleep 5
+        waited=$((waited + 5))
     done
 }
 
@@ -208,7 +215,26 @@ backup_file() {
     if ! sudo cp --preserve=mode,ownership,timestamps "$target_file" "$backup_file"; then
         return 1
     fi
+    prune_old_backups "$target_file"
     printf '%s\n' "$backup_file"
+}
+
+###############################################################################
+# FUNCTION: prune_old_backups
+# Description: Keep only the newest timestamped backups for a target file so
+#              .bak_* copies do not accumulate forever.
+###############################################################################
+prune_old_backups() {
+    local target_file="$1"
+    local keep=5
+    local old_backup
+
+    find "$(dirname "$target_file")" -maxdepth 1 -type f \
+        -name "$(basename "$target_file").bak_*" -printf '%T@ %p\n' 2>/dev/null | \
+        sort -nr | tail -n +"$((keep + 1))" | cut -d' ' -f2- | \
+        while IFS= read -r old_backup; do
+            sudo rm -f -- "$old_backup"
+        done
 }
 
 ###############################################################################
@@ -334,7 +360,7 @@ select_profile() {
     echo "  5) Use detected default ($default_profile)"
     echo ""
 
-    read -rp "Enter your choice: " pchoice
+    read -rp "Enter your choice: " pchoice < /dev/tty
     case "$pchoice" in
         1) PROFILE="x64" ;;
         2) PROFILE="x64-brk" ;;
@@ -433,7 +459,7 @@ declare -A required_commands=(
     [curl]="curl"
     [git]="git"
     [nc]="netcat-traditional"
-    [script]="bsdextrautils"
+    [script]="bsdutils"
 )
 
 ###############################################################################
@@ -987,6 +1013,7 @@ create_bash_aliases() {
 
     if [ -f "$ALIASES_FILE" ]; then
         sudo -u "$SUDO_USER" cp "$ALIASES_FILE" "$BACKUP_FILE"
+        prune_old_backups "$ALIASES_FILE"
         log "Backup created at $BACKUP_FILE"
     fi
 
@@ -1099,7 +1126,7 @@ EOL
 install_configure_snmpd() {
     log "Installing and configuring SNMPD."
 
-    if ! dpkg -l | grep -q "^ii.*lm-sensors"; then
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' lm-sensors 2>/dev/null | grep -q '^i'; then
         wait_for_apt
         if sudo apt-get install -y lm-sensors; then
             log "lm-sensors package installed successfully."
@@ -1111,7 +1138,7 @@ install_configure_snmpd() {
         log "lm-sensors package is already installed. No changes needed."
     fi
 
-    if ! dpkg -l | grep -q "^ii.*snmpd"; then
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' snmpd 2>/dev/null | grep -q '^i'; then
         wait_for_apt
         if sudo apt-get install -y snmpd; then
             log "snmpd package installed successfully."
@@ -1291,7 +1318,10 @@ create_pivpn_clients() {
 
     local client
     for client in "${CLIENTS[@]}"; do
-        if pivpn list | grep -q "$client"; then
+        # Match the client name as a whole field. grep -w is not enough here:
+        # hyphens count as word boundaries, so "host-iph" would still match
+        # an existing "host-iph-old" client.
+        if pivpn list | grep -Eq "(^|[[:space:]])${client}([[:space:]]|$)"; then
             log "Exists: $client"
         else
             log "Creating client: $client"
@@ -1335,10 +1365,13 @@ install_docker_ce() {
         return 1
     fi
 
+    # A package that is completely unknown to apt produces no "Candidate:" line
+    # at all, so an empty result must be treated the same as "(none)".
     local missing_candidates=()
-    local package
+    local package candidate
     for package in "${docker_packages[@]}"; do
-        if ! apt-cache policy "$package" | awk '/Candidate:/ { exit ($2 == "(none)") ? 1 : 0 }'; then
+        candidate="$(apt-cache policy "$package" 2>/dev/null | awk '/Candidate:/ {print $2}')"
+        if [ -z "$candidate" ] || [ "$candidate" = "(none)" ]; then
             missing_candidates+=("$package")
         fi
     done
@@ -1353,7 +1386,8 @@ install_docker_ce() {
 
         missing_candidates=()
         for package in "${docker_packages[@]}"; do
-            if ! apt-cache policy "$package" | awk '/Candidate:/ { exit ($2 == "(none)") ? 1 : 0 }'; then
+            candidate="$(apt-cache policy "$package" 2>/dev/null | awk '/Candidate:/ {print $2}')"
+            if [ -z "$candidate" ] || [ "$candidate" = "(none)" ]; then
                 missing_candidates+=("$package")
             fi
         done
@@ -1483,7 +1517,7 @@ remove_docker_and_tools() {
 install_wakeonlan() {
     log "Installing Wake-on-LAN tools."
 
-    if dpkg -l | grep -q "^ii.*wakeonlan"; then
+    if dpkg-query -W -f='${db:Status-Abbrev}' wakeonlan 2>/dev/null | grep -q '^i'; then
         log "wakeonlan is already installed. No changes needed."
     else
         wait_for_apt
@@ -1503,444 +1537,6 @@ install_wakeonlan() {
     fi
 
     log "Wake-on-LAN setup completed."
-}
-
-###############################################################################
-# FUNCTION: create_nas_backup_script
-# Description: Generate standalone NAS backup script using SMB credentials file
-###############################################################################
-create_nas_backup_script() {
-    log "Creating NAS backup script."
-
-    local invoking_user
-    local backup_script
-    local backup_script_tmp
-    local credentials_file="/root/.nas-credentials"
-    local nas_username=""
-    local nas_password=""
-
-    invoking_user="${SUDO_USER:-$(id -un)}"
-    backup_script="$USER_HOME/nas-backup.sh"
-
-    if [ ! -f "$credentials_file" ]; then
-        echo
-        read -rp "Enter NAS username: " nas_username < /dev/tty
-        read -rsp "Enter NAS password: " nas_password < /dev/tty
-        echo
-
-        if [ -z "$nas_username" ] || [ -z "$nas_password" ]; then
-            log "NAS credentials cannot be empty." "ERROR"
-            return 1
-        fi
-
-        sudo install -m 600 /dev/null "$credentials_file"
-        printf 'username=%s\npassword=%s\n' "$nas_username" "$nas_password" | sudo tee "$credentials_file" > /dev/null
-        sudo chmod 600 "$credentials_file"
-        log "Created credentials file at $credentials_file"
-    else
-        sudo chmod 600 "$credentials_file"
-        log "Credentials file already exists at $credentials_file"
-    fi
-
-    backup_script_tmp="$(sudo -u "$invoking_user" mktemp "$USER_HOME/.nas-backup.sh.tmp.XXXXXX")"
-    cat > "$backup_script_tmp" <<'EOF'
-#!/usr/bin/env bash
-#
-# nas-backup.sh
-#
-# DietPi/Debian NAS backup script with local logging.
-# - CIFS mount using /root/.nas-credentials
-# - DietPi-like filter model
-# - Includes /home and /mnt/dietpi_userdata
-# - Excludes known runtime/problem paths
-# - Writes the physical log file to the invoking user's home directory
-# - Keeps rsync CLI behavior close to the original script
-#
-
-set -euo pipefail
-
-# -----------------------------------------------------------------------------
-# Settings
-# -----------------------------------------------------------------------------
-
-NAS_HOST="10.0.0.100"
-NAS_SHARE="backup"
-NAS_MOUNT_POINT="/mnt/nas_backup"
-NAS_BACKUP_ROOT="dietpibackup"
-CREDENTIALS_FILE="/root/.nas-credentials"
-
-HOST_NAME="$(hostname -s)"
-LOCK_FILE="/var/run/nas-backup.lock"
-EXCLUDES_FILE=""
-LOCK_HELD=0
-NAS_MOUNTED_BY_US=0
-DIETPI_SERVICES_STOPPED=0
-declare -a STOPPED_SERVICES=()
-
-# -----------------------------------------------------------------------------
-# User / log path resolution
-# -----------------------------------------------------------------------------
-
-resolve_invoking_user() {
-    if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
-        printf '%s\n' "$SUDO_USER"
-    else
-        id -un
-    fi
-}
-
-resolve_home_dir() {
-    local user_name="$1"
-    local home_dir
-
-    home_dir="$(getent passwd "$user_name" | cut -d: -f6 || true)"
-
-    if [[ -n "$home_dir" ]]; then
-        printf '%s\n' "$home_dir"
-        return 0
-    fi
-
-    if [[ "$user_name" == "root" ]]; then
-        printf '%s\n' "/root"
-        return 0
-    fi
-
-    printf '%s\n' "/home/$user_name"
-}
-
-INVOKING_USER="$(resolve_invoking_user)"
-INVOKING_HOME="$(resolve_home_dir "$INVOKING_USER")"
-LOCAL_LOG="${INVOKING_HOME}/nas-backup.log"
-
-HOST_DIR="${NAS_MOUNT_POINT}/${NAS_BACKUP_ROOT}/${HOST_NAME}"
-MOUNT_OPTS="credentials=${CREDENTIALS_FILE},uid=0,gid=0,file_mode=0600,dir_mode=0700,vers=3.0,mfsymlinks"
-
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
-
-timestamp() {
-    date '+%F %T'
-}
-
-log() {
-    local message="$1"
-    local line
-    line="[$(timestamp)] $message"
-    printf '%s\n' "$line" | tee -a "$LOCAL_LOG"
-}
-
-prepare_log_file() {
-    mkdir -p "$INVOKING_HOME"
-    touch "$LOCAL_LOG"
-
-    if id "$INVOKING_USER" >/dev/null 2>&1; then
-        chown "$INVOKING_USER:$INVOKING_USER" "$LOCAL_LOG" 2>/dev/null || true
-    fi
-
-    chmod 0644 "$LOCAL_LOG" 2>/dev/null || true
-}
-
-# -----------------------------------------------------------------------------
-# Cleanup / locking
-# -----------------------------------------------------------------------------
-
-cleanup() {
-    local rc=$?
-    local service_name
-
-    # Prevent signal handling or the explicit exit below from invoking cleanup
-    # more than once.
-    trap - EXIT INT TERM
-
-    if [ "${NAS_MOUNTED_BY_US:-0}" -eq 1 ] && mountpoint -q "$NAS_MOUNT_POINT"; then
-        log "Unmounting NAS share: $NAS_MOUNT_POINT"
-        umount "$NAS_MOUNT_POINT" || log "Warning: failed to unmount $NAS_MOUNT_POINT"
-    fi
-
-    if [ "${DIETPI_SERVICES_STOPPED:-0}" -eq 1 ] && [ -x /boot/dietpi/dietpi-services ]; then
-        /boot/dietpi/dietpi-services start || log "Warning: failed to restart DietPi services"
-    else
-        for service_name in "${STOPPED_SERVICES[@]:-}"; do
-            if [ -n "$service_name" ]; then
-                systemctl start "$service_name" ||
-                    log "Warning: failed to restart service: $service_name"
-            fi
-        done
-    fi
-
-    if [[ -n "${EXCLUDES_FILE:-}" && -f "${EXCLUDES_FILE}" ]]; then
-        rm -f "$EXCLUDES_FILE"
-    fi
-
-    if [ "${LOCK_HELD:-0}" -eq 1 ]; then
-        flock -u 9 2>/dev/null || true
-        exec 9>&-
-    fi
-
-    if (( rc == 0 )); then
-        log "NAS backup finished successfully"
-    else
-        log "NAS backup ended with exit code $rc"
-    fi
-
-    if id "$INVOKING_USER" >/dev/null 2>&1; then
-        chown "$INVOKING_USER:$INVOKING_USER" "$LOCAL_LOG" 2>/dev/null || true
-    fi
-
-    exit "$rc"
-}
-
-acquire_lock() {
-    exec 9>"$LOCK_FILE"
-    if ! flock -n 9; then
-        log "Another backup is already running."
-        exit 1
-    fi
-    LOCK_HELD=1
-}
-
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-
-# -----------------------------------------------------------------------------
-# Validation
-# -----------------------------------------------------------------------------
-
-require_root() {
-    if [[ "${EUID}" -ne 0 ]]; then
-        echo "This script must be run as root." >&2
-        echo "Run it with: sudo bash $0" >&2
-        exit 1
-    fi
-}
-
-check_requirements() {
-    local cmds=(mount mount.cifs umount mountpoint findmnt flock rsync hostname awk grep tee mktemp getent cut apt-get systemctl)
-    local cmd
-
-    for cmd in "${cmds[@]}"; do
-        command -v "$cmd" >/dev/null 2>&1 || {
-            echo "Missing required command: $cmd" >&2
-            exit 1
-        }
-    done
-
-    if [[ ! -f "$CREDENTIALS_FILE" ]]; then
-        echo "Missing credentials file: $CREDENTIALS_FILE" >&2
-        exit 1
-    fi
-
-    chmod 600 "$CREDENTIALS_FILE" || true
-}
-
-# -----------------------------------------------------------------------------
-# Service handling
-# -----------------------------------------------------------------------------
-
-stop_services() {
-    if [ -x /boot/dietpi/dietpi-services ]; then
-        log "Stopping DietPi services for backup consistency."
-        if /boot/dietpi/dietpi-services stop; then
-            DIETPI_SERVICES_STOPPED=1
-        else
-            log "Failed to stop DietPi services."
-            return 1
-        fi
-        return 0
-    fi
-
-    log "Stopping selected services before backup"
-    local service_name
-    for service_name in cron crond snmpd docker containerd; do
-        if systemctl is-active --quiet "$service_name"; then
-            if systemctl stop "$service_name"; then
-                STOPPED_SERVICES+=("$service_name")
-            else
-                log "Failed to stop active service: $service_name"
-                return 1
-            fi
-        fi
-    done
-}
-
-# -----------------------------------------------------------------------------
-# NAS mounting
-# -----------------------------------------------------------------------------
-
-ensure_mountpoint() {
-    mkdir -p "$NAS_MOUNT_POINT"
-}
-
-mount_nas() {
-    if mountpoint -q "$NAS_MOUNT_POINT"; then
-        local mounted_source
-        mounted_source="$(findmnt -n -o SOURCE --target "$NAS_MOUNT_POINT")"
-        if [ "$mounted_source" = "//$NAS_HOST/$NAS_SHARE" ]; then
-            log "Expected NAS share is already mounted at $NAS_MOUNT_POINT"
-            return 0
-        fi
-        log "Refusing to use $NAS_MOUNT_POINT because it contains another mount: $mounted_source"
-        return 1
-    fi
-
-    log "Mounting //$NAS_HOST/$NAS_SHARE to $NAS_MOUNT_POINT"
-    mount -t cifs "//$NAS_HOST/$NAS_SHARE" "$NAS_MOUNT_POINT" -o "$MOUNT_OPTS"
-    NAS_MOUNTED_BY_US=1
-    log "NAS share mounted successfully"
-}
-
-prepare_target() {
-    mkdir -p "$HOST_DIR"
-    log "Backup target ready: $HOST_DIR"
-}
-
-write_metadata() {
-    log "Saving metadata."
-
-    dpkg --get-selections > "$HOST_DIR/package-list.txt" 2>/dev/null || true
-    crontab -l > "$HOST_DIR/root-crontab.txt" 2>/dev/null || true
-    systemctl list-unit-files > "$HOST_DIR/systemd-unit-files.txt" 2>/dev/null || true
-    hostname > "$HOST_DIR/hostname.txt" 2>/dev/null || true
-    uname -a > "$HOST_DIR/uname.txt" 2>/dev/null || true
-    date > "$HOST_DIR/backup-date.txt" 2>/dev/null || true
-
-    if [[ -r /etc/os-release ]]; then
-        cp /etc/os-release "$HOST_DIR/os-release.txt" 2>/dev/null || true
-    fi
-
-    if command -v docker >/dev/null 2>&1; then
-        docker ps -a > "$HOST_DIR/docker-ps.txt" 2>/dev/null || true
-        docker images > "$HOST_DIR/docker-images.txt" 2>/dev/null || true
-    fi
-}
-
-# -----------------------------------------------------------------------------
-# Filter file
-# -----------------------------------------------------------------------------
-
-create_excludes_file() {
-    EXCLUDES_FILE="$(mktemp /tmp/nas-backup-excludes.XXXXXX)"
-
-    cat > "$EXCLUDES_FILE" <<'EOF_EXCLUDES'
-- /mnt/nas_backup/
-+ /home/
-+ /home/**
-+ /mnt/
-+ /mnt/dietpi_userdata/
-+ /mnt/dietpi_userdata/**
-- /mnt/*
-- /media/*
-- /dev/
-- /proc/
-- /run/
-- /sys/
-- /tmp/
-- /var/swap
-- /.swap*
-- /etc/fake-hwclock.data
-- /lost+found/
-- /var/cache/apt/*
-- /var/lib/docker/
-- /var/lib/containerd/
-- /var/lib/containers/
-- /var/agentx/
-- /var/run/*
-- /var/tmp/*
-- /usr/share/man/
-EOF_EXCLUDES
-
-    log "Created exclude file: $EXCLUDES_FILE"
-}
-
-# -----------------------------------------------------------------------------
-# Backup
-# -----------------------------------------------------------------------------
-
-run_backup() {
-    log "Starting rsync backup"
-
-    rsync -aH --whole-file --inplace --numeric-ids --delete --delete-delay \
-        --safe-links \
-        --info=progress2 \
-        --info=name0 \
-        --filter="merge ${EXCLUDES_FILE}" \
-        / "$HOST_DIR" 2>&1 | tee -a "$LOCAL_LOG"
-
-    log "rsync completed"
-}
-
-# -----------------------------------------------------------------------------
-# Main
-# -----------------------------------------------------------------------------
-
-main() {
-    require_root
-    prepare_log_file
-    command -v apt-get >/dev/null 2>&1 || {
-        echo "Missing required command: apt-get" >&2
-        exit 1
-    }
-    command -v flock >/dev/null 2>&1 || {
-        echo "Missing required command: flock" >&2
-        exit 1
-    }
-    acquire_lock
-
-    log "Starting NAS backup script."
-
-    apt-get update
-    apt-get install -y cifs-utils rsync
-    check_requirements
-
-    ensure_mountpoint
-    mount_nas
-    prepare_target
-    create_excludes_file
-    stop_services
-    run_backup
-    write_metadata
-
-    log "Backup completed successfully to $HOST_DIR"
-}
-
-main "$@"
-EOF
-
-    chmod 0750 "$backup_script_tmp"
-    chown "$invoking_user:$invoking_user" "$backup_script_tmp"
-    if ! sudo -u "$invoking_user" mv "$backup_script_tmp" "$backup_script"; then
-        rm -f "$backup_script_tmp"
-        log "Failed to install NAS backup script at $backup_script" "ERROR"
-        return 1
-    fi
-
-    log "NAS backup script created at $backup_script"
-    echo
-    echo "Created files:"
-    echo "  Backup script: $backup_script"
-    echo "  Credentials:   $credentials_file"
-    echo "  Local log:     $USER_HOME/nas-backup.log"
-    echo
-    echo "NAS layout will be:"
-    echo "  //10.0.0.100/backup/dietpibackup/<short-hostname>/"
-    echo
-    echo "Behavior:"
-    echo "  Existing backup is updated in place"
-    echo "  New files are added"
-    echo "  Changed files are updated"
-    echo "  Removed files are deleted from backup"
-    echo
-    echo "Included rules:"
-    echo "  /home/"
-    echo "  /mnt/dietpi_userdata/"
-    echo "Excluded rules:"
-    echo "  /mnt/*, /media/*, /dev/, /proc/, /run/, /sys/, /tmp/"
-    echo "  /var/swap, /.swap*, /etc/fake-hwclock.data, /lost+found/"
-    echo "  /var/cache/apt/*, /var/lib/docker/, /var/lib/containerd/"
-    echo "  /var/lib/containers/, /var/agentx/, /var/run/*, /var/tmp/*"
-    echo "  /usr/share/man/"
 }
 
 ###############################################################################
@@ -2006,14 +1602,14 @@ detect_architecture() {
     case "$dpkg_arch" in
         amd64) printf '%s\n' "linux-amd64.deb"; return 0 ;;
         arm64) printf '%s\n' "linux-aarch64.deb"; return 0 ;;
-        armhf) printf '%s\n' "linux-arm7l.deb"; return 0 ;;
+        armhf) printf '%s\n' "linux-armv7l.deb"; return 0 ;;
     esac
 
     uname_arch="$(uname -m)"
     case "$uname_arch" in
         x86_64) printf '%s\n' "linux-amd64.deb" ;;
         aarch64|arm64) printf '%s\n' "linux-aarch64.deb" ;;
-        armv7l|armv7*|armhf|arm7l) printf '%s\n' "linux-arm7l.deb" ;;
+        armv7l|armv7*|armhf|arm7l) printf '%s\n' "linux-armv7l.deb" ;;
         *)
             printf 'Unsupported architecture: %s\n' "$uname_arch" >&2
             exit 1
@@ -2106,7 +1702,6 @@ summary_report() {
     log "Docker: Repository Added & Docker CE Installed"
     log "Fastfetch Repo: Cloned/updated with consolidated updater script"
     log "Wake-on-LAN: Not included in Run all tasks"
-    log "NAS Backup Script: Not included in Run all tasks"
     log "--------------"
     log "Not included in Run all tasks:"
     log "  - PiVPN installation"
@@ -2116,7 +1711,6 @@ summary_report() {
     log "  - Health check / paths display"
     log "  - Profile config display"
     log "  - Wake-on-LAN install"
-    log "  - NAS backup script generation"
     log "--------------"
     log "All tasks completed."
 }
@@ -2171,7 +1765,7 @@ restore_from_backup() {
     echo "  5) $user_home/.bash_aliases"
     echo "  6) Cancel"
 
-    read -rp "Enter your choice: " choice
+    read -rp "Enter your choice: " choice < /dev/tty
 
     case "$choice" in
         1) target_file="/etc/sudoers.d/99-sudo-nopasswd" ;;
@@ -2198,7 +1792,7 @@ restore_from_backup() {
 
     echo "Latest backup found:"
     echo "  $latest_backup"
-    read -rp "Restore this backup? [y/N]: " response
+    read -rp "Restore this backup? [y/N]: " response < /dev/tty
 
     if [[ ! "$response" =~ ^[Yy]$ ]]; then
         log "Restore aborted."
@@ -2298,13 +1892,19 @@ run_health_check() {
         echo "[ERROR] sudoers entry missing or incorrect"
     fi
 
-    if grep -Eq '^[#[:space:]]*PermitRootLogin[[:space:]]+no$' /etc/ssh/sshd_config 2>/dev/null; then
+    # Check the effective sshd configuration (including Include drop-ins)
+    # rather than grepping the raw file, where a commented-out line would
+    # otherwise produce a false [OK].
+    local effective_sshd=""
+    effective_sshd="$(sudo sshd -T 2>/dev/null || true)"
+
+    if grep -q '^permitrootlogin no$' <<< "$effective_sshd"; then
         echo "[OK]    SSH root login disabled"
     else
         echo "[ERROR] SSH root login not configured as expected"
     fi
 
-    if grep -Eq '^[#[:space:]]*AllowUsers[[:space:]]+' /etc/ssh/sshd_config 2>/dev/null; then
+    if grep -q '^allowusers ' <<< "$effective_sshd"; then
         echo "[OK]    AllowUsers configured"
     else
         echo "[WARN]  AllowUsers entry missing"
@@ -2336,7 +1936,7 @@ run_health_check() {
         echo "[WARN]  .bash_aliases missing"
     fi
 
-    if dpkg -l | grep -q "^ii.*snmpd"; then
+    if dpkg-query -W -f='${db:Status-Abbrev}' snmpd 2>/dev/null | grep -q '^i'; then
         echo "[OK]    snmpd package installed"
     else
         echo "[WARN]  snmpd package not installed"
@@ -2390,17 +1990,6 @@ run_health_check() {
         echo "[WARN]  wakeonlan command not available"
     fi
 
-    if [ -f "$user_home/nas-backup.sh" ]; then
-        echo "[OK]    NAS backup script exists"
-    else
-        echo "[WARN]  NAS backup script missing"
-    fi
-
-    if [ -f /root/.nas-credentials ]; then
-        echo "[OK]    NAS credentials file exists"
-    else
-        echo "[WARN]  NAS credentials file missing"
-    fi
 }
 
 ###############################################################################
@@ -2456,13 +2045,6 @@ show_important_paths() {
     echo
     echo "Wake-on-LAN:"
     echo "  $(command -v wakeonlan 2>/dev/null || echo 'not installed')"
-    echo
-    echo "NAS backup:"
-    echo "  Script: $user_home/nas-backup.sh"
-    echo "  Credentials: /root/.nas-credentials"
-    echo "  Mount point: /mnt/nas_backup"
-    echo "  NAS layout:"
-    echo "    //10.0.0.100/backup/dietpibackup/${short_host}/"
     echo
     echo "Latest backups:"
     local files=(
@@ -2626,12 +2208,11 @@ menu() {
         echo "  19) Show important paths"
         echo "  20) Show current profile config"
         echo "  21) Install Wake-on-LAN tools"
-        echo "  22) Create NAS backup script"
-        echo "  23) Configure UFW firewall"
-        echo "  24) Check if reboot is required"
-        echo "  25) Exit"
+        echo "  22) Configure UFW firewall"
+        echo "  23) Check if reboot is required"
+        echo "  24) Exit"
 
-        read -rp "Enter your choice: " choice
+        read -rp "Enter your choice: " choice < /dev/tty
 
         case "$choice" in
             1) run_menu_action "System Update and Upgrade" system_update_upgrade ;;
@@ -2655,10 +2236,9 @@ menu() {
             19) run_menu_action "Show important paths" show_important_paths ;;
             20) run_menu_action "Show current profile config" show_current_profile_config ;;
             21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
-            22) run_menu_action "Create NAS backup script" create_nas_backup_script ;;
-            23) run_menu_action "Configure UFW firewall" configure_ufw ;;
-            24) run_menu_action "Check if reboot is required" check_reboot_required ;;
-            25)
+            22) run_menu_action "Configure UFW firewall" configure_ufw ;;
+            23) run_menu_action "Check if reboot is required" check_reboot_required ;;
+            24)
                 log "Script execution completed."
                 log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
                 echo ". $USER_HOME/.bashrc && . $USER_HOME/.bash_aliases"
@@ -2671,7 +2251,7 @@ menu() {
                 ;;
         esac
 
-        read -rp "Press Enter to continue..."
+        read -rp "Press Enter to continue..." < /dev/tty
     done
 }
 
