@@ -73,7 +73,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.30-4"
+SCRIPT_VERSION="v2026.07.30-5"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -719,7 +719,7 @@ dietpi_bookworm_to_trixie() {
 ###############################################################################
 self_update() {
     local update_url="https://raw.githubusercontent.com/mews-se/hostctl/main/hostctl.sh"
-    local script_path tmp new_version response
+    local script_path tmp new_version response cache_buster
 
     script_path="$(readlink -f "${BASH_SOURCE[0]}")"
     if [ ! -f "$script_path" ]; then
@@ -729,8 +729,13 @@ self_update() {
 
     log "Checking for a newer hostctl.sh at GitHub (main branch)."
 
+    # raw.githubusercontent.com is served through a CDN that caches responses
+    # for several minutes. A unique query string per request bypasses the
+    # cache, so an update run right after a merge still sees the new version.
+    cache_buster="$(date +%s)"
+
     tmp="$(mktemp "$(dirname "$script_path")/.hostctl-update.XXXXXX")"
-    if ! curl --proto '=https' --tlsv1.2 -fsSL "$update_url" -o "$tmp"; then
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "${update_url}?${cache_buster}" -o "$tmp"; then
         rm -f "$tmp"
         log "Failed to download the latest hostctl.sh." "ERROR"
         return 1
