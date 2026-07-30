@@ -73,7 +73,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.30-3"
+SCRIPT_VERSION="v2026.07.30-4"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -988,13 +988,15 @@ generate_ssh_key() {
 ###############################################################################
 # FUNCTION: distribute_ssh_key
 # Description: Copy the invoking user's public key to one or more remote hosts
-#              with ssh-copy-id. Targets are entered as user@host, separated by
-#              spaces. Each transfer may prompt for the remote password.
+#              with ssh-copy-id. Targets can be picked from the ssh aliases in
+#              ~/.bash_aliases (including any -p port) or entered manually as
+#              user@host. Each transfer may prompt for the remote password.
 ###############################################################################
 distribute_ssh_key() {
     log "Distributing SSH public key."
 
     local pub_key="$USER_HOME/.ssh/id_ed25519.pub"
+    local aliases_file="$USER_HOME/.bash_aliases"
     local targets target response
 
     if [ ! -f "$pub_key" ]; then
@@ -1013,20 +1015,106 @@ distribute_ssh_key() {
         return 1
     fi
 
-    echo
-    echo "Enter one or more targets (user@host), separated by spaces."
-    echo "Example: dietpi@10.0.0.8 martin@10.0.0.11"
-    read -rp "Targets: " targets < /dev/tty
+    # Collect ssh targets from .bash_aliases. Only aliases whose command is
+    # ssh are considered; a -p port is picked up when present.
+    local -a alias_names=() alias_targets=() alias_ports=()
+    local alias_re="^[[:space:]]*alias[[:space:]]+([^=]+)=[\"']ssh[[:space:]]+([^\"']+)[\"']"
+    local line word
+    if [ -f "$aliases_file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [[ "$line" =~ $alias_re ]]; then
+                local a_name="${BASH_REMATCH[1]}"
+                local a_cmd="${BASH_REMATCH[2]}"
+                local a_target="" a_port="" expect_port=0
+                for word in $a_cmd; do
+                    if [ "$expect_port" -eq 1 ]; then
+                        a_port="$word"
+                        expect_port=0
+                    elif [ "$word" = "-p" ]; then
+                        expect_port=1
+                    elif [[ "$word" == *@* ]]; then
+                        a_target="$word"
+                    fi
+                done
+                if [ -n "$a_target" ]; then
+                    alias_names+=("$a_name")
+                    alias_targets+=("$a_target")
+                    alias_ports+=("$a_port")
+                fi
+            fi
+        done < "$aliases_file"
+    fi
 
-    if [ -z "$targets" ]; then
-        log "No targets given. Nothing to do."
+    local -a chosen_targets=() chosen_ports=()
+    local selection sel i
+
+    if [ "${#alias_names[@]}" -gt 0 ]; then
+        echo
+        echo "SSH targets found in .bash_aliases:"
+        for i in "${!alias_names[@]}"; do
+            if [ -n "${alias_ports[$i]}" ]; then
+                printf '  %2d) %-12s %s (port %s)\n' "$((i + 1))" "${alias_names[$i]}" "${alias_targets[$i]}" "${alias_ports[$i]}"
+            else
+                printf '  %2d) %-12s %s\n' "$((i + 1))" "${alias_names[$i]}" "${alias_targets[$i]}"
+            fi
+        done
+        echo
+        echo "Enter numbers separated by spaces, 'a' for all, or 'm' for manual entry."
+        read -rp "Selection: " selection < /dev/tty
+    else
+        log "No ssh aliases found in $aliases_file. Falling back to manual entry."
+        selection="m"
+    fi
+
+    case "$selection" in
+        "")
+            log "Nothing selected. SSH key distribution cancelled."
+            return 0
+            ;;
+        [Aa])
+            for i in "${!alias_targets[@]}"; do
+                chosen_targets+=("${alias_targets[$i]}")
+                chosen_ports+=("${alias_ports[$i]}")
+            done
+            ;;
+        [Mm])
+            echo
+            echo "Enter one or more targets (user@host), separated by spaces."
+            echo "Example: dietpi@10.0.0.8 martin@10.0.0.11"
+            read -rp "Targets: " targets < /dev/tty
+            if [ -z "$targets" ]; then
+                log "No targets given. Nothing to do."
+                return 0
+            fi
+            for target in $targets; do
+                chosen_targets+=("$target")
+                chosen_ports+=("")
+            done
+            ;;
+        *)
+            for sel in $selection; do
+                if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#alias_targets[@]}" ]; then
+                    chosen_targets+=("${alias_targets[$((sel - 1))]}")
+                    chosen_ports+=("${alias_ports[$((sel - 1))]}")
+                else
+                    log "Ignoring invalid selection: $sel" "WARN"
+                fi
+            done
+            ;;
+    esac
+
+    if [ "${#chosen_targets[@]}" -eq 0 ]; then
+        log "No valid targets selected. Nothing to do."
         return 0
     fi
 
     local failed=()
-    for target in $targets; do
-        log "Copying public key to $target"
-        if sudo -u "$SUDO_USER" ssh-copy-id -i "$pub_key" "$target" < /dev/tty; then
+    local port
+    for i in "${!chosen_targets[@]}"; do
+        target="${chosen_targets[$i]}"
+        port="${chosen_ports[$i]}"
+        log "Copying public key to $target${port:+ (port $port)}"
+        if sudo -u "$SUDO_USER" ssh-copy-id -i "$pub_key" ${port:+-p "$port"} "$target" < /dev/tty; then
             log "Key installed on $target"
         else
             failed+=("$target")
