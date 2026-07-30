@@ -18,10 +18,12 @@
 #     - SSH hardening with automatic rollback
 #     - Passwordless sudo
 #     - SSH key generation
+#     - SSH key distribution (ssh-copy-id)
 #     - .bashrc recreation
 #     - Interactive .bash_aliases merge/update
-#     - SNMPD install (profile-aware)
+#     - SNMPD install (profile-aware) & removal
 #     - Docker install & removal
+#     - Docker maintenance (prune / Compose stack updates)
 #     - PiVPN install + client configs + QR codes
 #     - DietPi upgrade helpers
 #     - Fastfetch repo clone/update
@@ -32,7 +34,8 @@
 #     - Wake-on-LAN tools
 #     - Optional UFW configuration
 #     - Reboot-required detection
-#     - Logging to ~/hostctl.log
+#     - Self-update from GitHub
+#     - Logging to ~/hostctl.log (with rotation)
 #     - Interactive menu
 ###############################################################################
 
@@ -70,7 +73,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.30"
+SCRIPT_VERSION="v2026.07.30-2"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -101,6 +104,25 @@ log() {
         sudo -u "$SUDO_USER" install -m 0644 /dev/null "$LOG_FILE" 2>/dev/null || return 0
     fi
     printf '%s\n' "$line" | sudo -u "$SUDO_USER" tee -a "$LOG_FILE" >/dev/null 2>&1 || true
+}
+
+###############################################################################
+# FUNCTION: rotate_log_file
+# Description: Keep hostctl.log from growing forever. When it exceeds 1 MB the
+#              current log is moved aside to hostctl.log.old (one generation).
+###############################################################################
+rotate_log_file() {
+    local max_size=1048576
+    local size
+
+    if [ ! -f "$LOG_FILE" ] || [ -L "$LOG_FILE" ]; then
+        return 0
+    fi
+
+    size="$(stat -c %s "$LOG_FILE" 2>/dev/null || echo 0)"
+    if [ "$size" -gt "$max_size" ]; then
+        sudo -u "$SUDO_USER" mv -f "$LOG_FILE" "${LOG_FILE}.old" 2>/dev/null || return 0
+    fi
 }
 
 ###############################################################################
@@ -689,6 +711,73 @@ dietpi_bookworm_to_trixie() {
 }
 
 ###############################################################################
+# FUNCTION: self_update
+# Description: Fetch the latest hostctl.sh from GitHub, validate it, show the
+#              version change, and replace this script after confirmation. The
+#              replacement is an atomic rename, so the running instance keeps
+#              executing from the old inode and is unaffected until restarted.
+###############################################################################
+self_update() {
+    local update_url="https://raw.githubusercontent.com/mews-se/hostctl/main/hostctl.sh"
+    local script_path tmp new_version response
+
+    script_path="$(readlink -f "${BASH_SOURCE[0]}")"
+    if [ ! -f "$script_path" ]; then
+        log "Could not resolve the running script path." "ERROR"
+        return 1
+    fi
+
+    log "Checking for a newer hostctl.sh at GitHub (main branch)."
+
+    tmp="$(mktemp "$(dirname "$script_path")/.hostctl-update.XXXXXX")"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "$update_url" -o "$tmp"; then
+        rm -f "$tmp"
+        log "Failed to download the latest hostctl.sh." "ERROR"
+        return 1
+    fi
+
+    if ! bash -n "$tmp"; then
+        rm -f "$tmp"
+        log "Downloaded script failed Bash syntax validation." "ERROR"
+        return 1
+    fi
+
+    new_version="$(grep -m1 '^SCRIPT_VERSION=' "$tmp" | cut -d'"' -f2)"
+    if [ -z "$new_version" ]; then
+        rm -f "$tmp"
+        log "Downloaded file does not look like hostctl.sh (no SCRIPT_VERSION found)." "ERROR"
+        return 1
+    fi
+
+    if cmp -s "$tmp" "$script_path"; then
+        rm -f "$tmp"
+        log "hostctl is already up to date ($SCRIPT_VERSION)."
+        return 0
+    fi
+
+    echo
+    echo "Current version: $SCRIPT_VERSION"
+    echo "New version:     $new_version"
+    echo "Target file:     $script_path"
+    read -rp "Replace the script with the downloaded version? [y/N]: " response < /dev/tty
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        rm -f "$tmp"
+        log "Self-update cancelled."
+        return 0
+    fi
+
+    chown --reference="$script_path" "$tmp" 2>/dev/null || true
+    chmod --reference="$script_path" "$tmp" 2>/dev/null || chmod 0755 "$tmp"
+    if ! mv -f "$tmp" "$script_path"; then
+        rm -f "$tmp"
+        log "Failed to install the updated script." "ERROR"
+        return 1
+    fi
+
+    log "hostctl updated to $new_version. Exit and restart the script to use the new version."
+}
+
+###############################################################################
 # FUNCTION: update_sudoers
 # Description: Enable passwordless sudo for the sudo group
 ###############################################################################
@@ -894,6 +983,63 @@ generate_ssh_key() {
     if [ -f "$KEY_FILE.pub" ]; then
         sudo chmod 644 "$KEY_FILE.pub"
     fi
+}
+
+###############################################################################
+# FUNCTION: distribute_ssh_key
+# Description: Copy the invoking user's public key to one or more remote hosts
+#              with ssh-copy-id. Targets are entered as user@host, separated by
+#              spaces. Each transfer may prompt for the remote password.
+###############################################################################
+distribute_ssh_key() {
+    log "Distributing SSH public key."
+
+    local pub_key="$USER_HOME/.ssh/id_ed25519.pub"
+    local targets target response
+
+    if [ ! -f "$pub_key" ]; then
+        log "No public key found at $pub_key." "WARN"
+        read -rp "Generate one now? [Y/n]: " response < /dev/tty
+        if [[ -z "$response" || "$response" =~ ^[Yy]$ ]]; then
+            generate_ssh_key
+        else
+            log "SSH key distribution cancelled."
+            return 0
+        fi
+    fi
+
+    if ! command -v ssh-copy-id >/dev/null 2>&1; then
+        log "ssh-copy-id is not available (openssh-client)." "ERROR"
+        return 1
+    fi
+
+    echo
+    echo "Enter one or more targets (user@host), separated by spaces."
+    echo "Example: dietpi@10.0.0.8 martin@10.0.0.11"
+    read -rp "Targets: " targets < /dev/tty
+
+    if [ -z "$targets" ]; then
+        log "No targets given. Nothing to do."
+        return 0
+    fi
+
+    local failed=()
+    for target in $targets; do
+        log "Copying public key to $target"
+        if sudo -u "$SUDO_USER" ssh-copy-id -i "$pub_key" "$target" < /dev/tty; then
+            log "Key installed on $target"
+        else
+            failed+=("$target")
+            log "Failed to install key on $target" "WARN"
+        fi
+    done
+
+    if [ "${#failed[@]}" -gt 0 ]; then
+        log "Key distribution failed for: ${failed[*]}" "ERROR"
+        return 1
+    fi
+
+    log "SSH key distribution completed."
 }
 
 ###############################################################################
@@ -1214,6 +1360,50 @@ EOF
 }
 
 ###############################################################################
+# FUNCTION: remove_snmpd
+# Description: Stop, disable, and purge SNMPD. Configuration is removed by the
+#              purge, but timestamped .bak_* backups of snmpd.conf are kept so
+#              a reinstall can be restored. lm-sensors is left installed.
+###############################################################################
+remove_snmpd() {
+    log "Removing SNMPD."
+
+    if ! dpkg-query -W -f='${db:Status-Abbrev}' snmpd 2>/dev/null | grep -q '^i'; then
+        log "snmpd is not installed. Nothing to remove."
+        return 0
+    fi
+
+    local confirmation
+    echo
+    echo "WARNING: This removes the snmpd package and purges its configuration"
+    echo "         (/etc/snmp/snmpd.conf). Timestamped .bak_* backups are kept."
+    echo "         lm-sensors is left installed."
+    read -rp "Remove SNMPD? [y/N]: " confirmation < /dev/tty
+    if [[ ! "$confirmation" =~ ^[Yy]$ ]]; then
+        log "SNMPD removal cancelled."
+        return 0
+    fi
+
+    if sudo systemctl is-active --quiet snmpd; then
+        sudo systemctl stop snmpd || log "Could not stop snmpd before removal." "WARN"
+    fi
+    sudo systemctl disable snmpd >/dev/null 2>&1 || true
+
+    wait_for_apt
+    if ! sudo apt-get purge -y snmpd; then
+        log "Failed to purge snmpd." "ERROR"
+        return 1
+    fi
+
+    wait_for_apt
+    if ! sudo apt-get autoremove -y; then
+        log "apt-get autoremove failed during SNMPD cleanup." "WARN"
+    fi
+
+    log "SNMPD removed successfully."
+}
+
+###############################################################################
 # FUNCTION: install_docker_repository
 # Description: Add Docker official repository
 ###############################################################################
@@ -1416,6 +1606,124 @@ install_docker_ce() {
         log "Docker installed, but group 'docker' was not found." "WARN"
         return 1
     fi
+}
+
+###############################################################################
+# FUNCTION: docker_maintenance
+# Description: Docker housekeeping submenu: prune unused data and/or pull and
+#              restart all discovered Docker Compose stacks.
+###############################################################################
+docker_maintenance() {
+    if ! command -v docker >/dev/null 2>&1; then
+        log "Docker is not installed." "ERROR"
+        return 1
+    fi
+
+    local choice
+    echo
+    echo "Docker maintenance:"
+    echo "  1) Prune unused data (stopped containers, networks, dangling images, build cache)"
+    echo "  2) Update all Docker Compose stacks (pull + up -d)"
+    echo "  3) Cancel"
+    read -rp "Enter your choice: " choice < /dev/tty
+
+    case "$choice" in
+        1) docker_prune ;;
+        2) docker_compose_update ;;
+        3|"") log "Docker maintenance cancelled." ;;
+        *)
+            log "Invalid Docker maintenance choice." "ERROR"
+            return 1
+            ;;
+    esac
+}
+
+###############################################################################
+# FUNCTION: docker_prune
+# Description: Show current Docker disk usage and prune unused data after
+#              confirmation. Optionally also removes all unused images (-a).
+###############################################################################
+docker_prune() {
+    echo
+    echo "Current Docker disk usage:"
+    sudo docker system df || true
+    echo
+
+    local include_images response
+    read -rp "Also remove ALL unused images, not only dangling ones? [y/N]: " include_images < /dev/tty
+    read -rp "Proceed with prune? [y/N]: " response < /dev/tty
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        log "Docker prune cancelled."
+        return 0
+    fi
+
+    if [[ "$include_images" =~ ^[Yy]$ ]]; then
+        sudo docker system prune -af
+    else
+        sudo docker system prune -f
+    fi
+
+    log "Docker prune completed."
+}
+
+###############################################################################
+# FUNCTION: docker_compose_update
+# Description: Discover Docker Compose files under common locations and, after
+#              confirmation, pull images and restart each stack.
+###############################################################################
+docker_compose_update() {
+    if ! sudo docker compose version >/dev/null 2>&1; then
+        log "Docker Compose plugin is not available." "ERROR"
+        return 1
+    fi
+
+    local search_dirs=("$USER_HOME" /opt /srv)
+    local compose_files=()
+    local dir file
+
+    while IFS= read -r file; do
+        compose_files+=("$file")
+    done < <(
+        for dir in "${search_dirs[@]}"; do
+            [ -d "$dir" ] || continue
+            find "$dir" -maxdepth 3 -type f \
+                \( -name docker-compose.yml -o -name docker-compose.yaml \
+                   -o -name compose.yml -o -name compose.yaml \) 2>/dev/null
+        done | sort -u
+    )
+
+    if [ "${#compose_files[@]}" -eq 0 ]; then
+        log "No Docker Compose files found under: ${search_dirs[*]} (max depth 3)." "WARN"
+        return 0
+    fi
+
+    echo
+    echo "Found Docker Compose stacks:"
+    printf '  %s\n' "${compose_files[@]}"
+    local response
+    read -rp "Pull images and restart all of these stacks? [y/N]: " response < /dev/tty
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        log "Compose stack update cancelled."
+        return 0
+    fi
+
+    local failed=()
+    for file in "${compose_files[@]}"; do
+        log "Updating stack: $file"
+        if sudo docker compose -f "$file" pull && sudo docker compose -f "$file" up -d; then
+            log "Stack updated: $file"
+        else
+            failed+=("$file")
+            log "Failed to update stack: $file" "WARN"
+        fi
+    done
+
+    if [ "${#failed[@]}" -gt 0 ]; then
+        log "Stacks with errors: ${failed[*]}" "ERROR"
+        return 1
+    fi
+
+    log "All Compose stacks updated successfully."
 }
 
 ###############################################################################
@@ -1705,8 +2013,12 @@ summary_report() {
     log "--------------"
     log "Not included in Run all tasks:"
     log "  - PiVPN installation"
-    log "  - Docker removal"
+    log "  - SNMPD removal"
+    log "  - Docker removal / maintenance"
     log "  - DietPi upgrades"
+    log "  - Self-update"
+    log "  - SSH key distribution"
+    log "  - UFW configuration"
     log "  - Backup restore"
     log "  - Health check / paths display"
     log "  - Profile config display"
@@ -1990,6 +2302,52 @@ run_health_check() {
         echo "[WARN]  wakeonlan command not available"
     fi
 
+    # Root filesystem usage
+    local disk_pct
+    disk_pct="$(df --output=pcent / 2>/dev/null | tail -n1 | tr -dc '0-9')"
+    if [ -n "$disk_pct" ]; then
+        if [ "$disk_pct" -ge 85 ]; then
+            echo "[WARN]  Root filesystem usage: ${disk_pct}%"
+        else
+            echo "[OK]    Root filesystem usage: ${disk_pct}%"
+        fi
+    else
+        echo "[WARN]  Could not determine root filesystem usage"
+    fi
+
+    # Failed systemd units
+    local failed_units
+    failed_units="$(sudo systemctl --failed --no-legend --plain 2>/dev/null | awk '{print $1}')"
+    if [ -z "$failed_units" ]; then
+        echo "[OK]    No failed systemd units"
+    else
+        echo "[WARN]  Failed systemd units:"
+        sed 's/^/          /' <<< "$failed_units"
+    fi
+
+    # CPU temperature (thermal zone 0 where available)
+    local temp_raw temp_c
+    if [ -r /sys/class/thermal/thermal_zone0/temp ]; then
+        temp_raw="$(cat /sys/class/thermal/thermal_zone0/temp)"
+        temp_c=$((temp_raw / 1000))
+        if [ "$temp_c" -ge 75 ]; then
+            echo "[WARN]  CPU temperature: ${temp_c}C"
+        else
+            echo "[OK]    CPU temperature: ${temp_c}C"
+        fi
+    else
+        echo "[INFO]  CPU temperature not available on this platform"
+    fi
+
+    # Pending package updates, based on the current package lists. The count
+    # is only as fresh as the last apt-get update (run at script startup).
+    local pending_updates
+    pending_updates="$(apt-get -s dist-upgrade 2>/dev/null | grep -c '^Inst ' || true)"
+    if [ "$pending_updates" -eq 0 ]; then
+        echo "[OK]    No pending package updates"
+    else
+        echo "[WARN]  Pending package updates: $pending_updates"
+    fi
 }
 
 ###############################################################################
@@ -2187,58 +2545,75 @@ menu() {
         echo "Profile: $PROFILE"
         echo "-------------------------------------"
         echo "Please select an option:"
-        echo "  1) System Update and Upgrade"
-        echo "  2) DietPi: Bullseye -> Bookworm"
-        echo "  3) DietPi: Bookworm -> Trixie"
-        echo "  4) Update sudoers"
-        echo "  5) Configure SSH"
-        echo "  6) Generate SSH Key"
-        echo "  7) Create/Update .bashrc"
-        echo "  8) Create/Update .bash_aliases"
-        echo "  9) Install and Configure SNMPD"
-        echo "  10) Install Docker official repo"
-        echo "  11) Install PiVPN"
-        echo "  12) Install Docker and relevant tools"
-        echo "  13) Remove Docker and relevant tools"
-        echo "  14) Clone/update the update-fastfetch repo"
-        echo "  15) Run all tasks"
-        echo "  16) Show available backups"
-        echo "  17) Restore from backup"
-        echo "  18) Run health check"
-        echo "  19) Show important paths"
-        echo "  20) Show current profile config"
+        echo ""
+        echo "System:"
+        echo "   1) System update and upgrade"
+        echo "   2) Check if reboot is required"
+        echo "   3) DietPi: Bullseye -> Bookworm"
+        echo "   4) DietPi: Bookworm -> Trixie"
+        echo "   5) Self-update hostctl"
+        echo ""
+        echo "Setup and configuration:"
+        echo "   6) Run all standard tasks"
+        echo "   7) Update sudoers"
+        echo "   8) Configure SSH"
+        echo "   9) Generate SSH key"
+        echo "  10) Distribute SSH key to other hosts"
+        echo "  11) Create/Update .bashrc"
+        echo "  12) Create/Update .bash_aliases"
+        echo "  13) Configure UFW firewall"
+        echo ""
+        echo "Services and applications:"
+        echo "  14) Install and configure SNMPD"
+        echo "  15) Remove SNMPD"
+        echo "  16) Install Docker official repo"
+        echo "  17) Install Docker and relevant tools"
+        echo "  18) Docker maintenance (prune / Compose update)"
+        echo "  19) Remove Docker and relevant tools"
+        echo "  20) Install PiVPN"
         echo "  21) Install Wake-on-LAN tools"
-        echo "  22) Configure UFW firewall"
-        echo "  23) Check if reboot is required"
-        echo "  24) Exit"
+        echo "  22) Clone/update the update-fastfetch repo"
+        echo ""
+        echo "Status and recovery:"
+        echo "  23) Run health check"
+        echo "  24) Show important paths"
+        echo "  25) Show current profile config"
+        echo "  26) Show available backups"
+        echo "  27) Restore from backup"
+        echo ""
+        echo "   0) Exit"
 
         read -rp "Enter your choice: " choice < /dev/tty
 
         case "$choice" in
-            1) run_menu_action "System Update and Upgrade" system_update_upgrade ;;
-            2) run_menu_action "DietPi: Bullseye -> Bookworm" dietpi_bullseye_to_bookworm ;;
-            3) run_menu_action "DietPi: Bookworm -> Trixie" dietpi_bookworm_to_trixie ;;
-            4) run_menu_action "Update sudoers" update_sudoers ;;
-            5) run_menu_action "Configure SSH" configure_ssh ;;
-            6) run_menu_action "Generate SSH Key" generate_ssh_key ;;
-            7) run_menu_action "Create/Update .bashrc" create_bashrc ;;
-            8) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
-            9) run_menu_action "Install and Configure SNMPD" install_configure_snmpd ;;
-            10) run_menu_action "Install Docker official repo" install_docker_repository ;;
-            11) run_menu_action "Install PiVPN" install_pivpn ;;
-            12) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
-            13) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
-            14) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
-            15) run_menu_action "Run all tasks" run_all_tasks ;;
-            16) run_menu_action "Show available backups" show_available_backups ;;
-            17) run_menu_action "Restore from backup" restore_from_backup ;;
-            18) run_menu_action "Run health check" run_health_check ;;
-            19) run_menu_action "Show important paths" show_important_paths ;;
-            20) run_menu_action "Show current profile config" show_current_profile_config ;;
+            1) run_menu_action "System update and upgrade" system_update_upgrade ;;
+            2) run_menu_action "Check if reboot is required" check_reboot_required ;;
+            3) run_menu_action "DietPi: Bullseye -> Bookworm" dietpi_bullseye_to_bookworm ;;
+            4) run_menu_action "DietPi: Bookworm -> Trixie" dietpi_bookworm_to_trixie ;;
+            5) run_menu_action "Self-update hostctl" self_update ;;
+            6) run_menu_action "Run all standard tasks" run_all_tasks ;;
+            7) run_menu_action "Update sudoers" update_sudoers ;;
+            8) run_menu_action "Configure SSH" configure_ssh ;;
+            9) run_menu_action "Generate SSH key" generate_ssh_key ;;
+            10) run_menu_action "Distribute SSH key to other hosts" distribute_ssh_key ;;
+            11) run_menu_action "Create/Update .bashrc" create_bashrc ;;
+            12) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
+            13) run_menu_action "Configure UFW firewall" configure_ufw ;;
+            14) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
+            15) run_menu_action "Remove SNMPD" remove_snmpd ;;
+            16) run_menu_action "Install Docker official repo" install_docker_repository ;;
+            17) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
+            18) run_menu_action "Docker maintenance" docker_maintenance ;;
+            19) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
+            20) run_menu_action "Install PiVPN" install_pivpn ;;
             21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
-            22) run_menu_action "Configure UFW firewall" configure_ufw ;;
-            23) run_menu_action "Check if reboot is required" check_reboot_required ;;
-            24)
+            22) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
+            23) run_menu_action "Run health check" run_health_check ;;
+            24) run_menu_action "Show important paths" show_important_paths ;;
+            25) run_menu_action "Show current profile config" show_current_profile_config ;;
+            26) run_menu_action "Show available backups" show_available_backups ;;
+            27) run_menu_action "Restore from backup" restore_from_backup ;;
+            0)
                 log "Script execution completed."
                 log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
                 echo ". $USER_HOME/.bashrc && . $USER_HOME/.bash_aliases"
@@ -2258,6 +2633,7 @@ menu() {
 ###############################################################################
 # START
 ###############################################################################
+rotate_log_file
 log "hostctl execution started. Version: $SCRIPT_VERSION"
 select_profile
 apply_profile_config
