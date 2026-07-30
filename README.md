@@ -1,6 +1,6 @@
 # Automated System Configuration Script
 
-![Version](https://img.shields.io/badge/version-v2026.07.30--3-informational)
+![Version](https://img.shields.io/badge/version-v2026.07.30--6-informational)
 ![License](https://img.shields.io/badge/license-Unlicense-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Debian%2FDietPi-lightgrey)
 ![Shell](https://img.shields.io/badge/shell-bash-blue)
@@ -31,7 +31,7 @@ and returning failed actions safely to the menu.
 - Profile-based SNMPD installation, configuration, and removal
 - Docker repository, installation, and removal tools
 - Docker maintenance: prune unused data and update Docker Compose stacks
-- PiVPN installation and client generation
+- PiVPN installation, client generation, and removal
 - Wake-on-LAN tools
 - Fastfetch repository and updater integration
 
@@ -133,6 +133,12 @@ The action requires typing `REMOVE` before deletion begins.
 SNMPD removal stops and disables the service and purges the package and its
 configuration after confirmation. Timestamped `snmpd.conf` backups are kept,
 and `lm-sensors` is left installed.
+
+### PiVPN removal
+
+PiVPN removal runs PiVPN's own interactive uninstaller (`pivpn -u`) in a
+pseudo-terminal, the same way the installer is run. The uninstaller asks
+which dependencies to remove and deletes the VPN server configuration.
 
 ## Docker maintenance
 
