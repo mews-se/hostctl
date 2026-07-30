@@ -73,7 +73,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.30-2"
+SCRIPT_VERSION="v2026.07.30-3"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -1993,41 +1993,6 @@ EOF
 }
 
 ###############################################################################
-# FUNCTION: summary_report
-# Description: Print completion summary for run_all_tasks
-###############################################################################
-summary_report() {
-    log "Summary Report:"
-    log "--------------"
-    log "Version: $SCRIPT_VERSION"
-    log "Profile: $PROFILE"
-    log "System Update & Upgrade: Completed"
-    log "Sudoers: Updated"
-    log "SSH: Configured"
-    log "SSH Key: Generated/Verified"
-    log ".bashrc & .bash_aliases: Created/Updated"
-    log "SNMPD: Installed/Configured"
-    log "Docker: Repository Added & Docker CE Installed"
-    log "Fastfetch Repo: Cloned/updated with consolidated updater script"
-    log "Wake-on-LAN: Not included in Run all tasks"
-    log "--------------"
-    log "Not included in Run all tasks:"
-    log "  - PiVPN installation"
-    log "  - SNMPD removal"
-    log "  - Docker removal / maintenance"
-    log "  - DietPi upgrades"
-    log "  - Self-update"
-    log "  - SSH key distribution"
-    log "  - UFW configuration"
-    log "  - Backup restore"
-    log "  - Health check / paths display"
-    log "  - Profile config display"
-    log "  - Wake-on-LAN install"
-    log "--------------"
-    log "All tasks completed."
-}
-
-###############################################################################
 # FUNCTION: show_available_backups
 # Description: Show latest backup files for important configuration files
 ###############################################################################
@@ -2461,7 +2426,6 @@ show_current_profile_config() {
 # FUNCTION: configure_ufw
 # Description: Optionally install and configure a conservative UFW baseline:
 #              deny inbound traffic, allow outbound traffic, and keep SSH open.
-#              This is deliberately menu-only and is not included in Run all.
 ###############################################################################
 configure_ufw() {
     log "Configuring UFW firewall."
@@ -2511,26 +2475,6 @@ configure_ufw() {
 }
 
 ###############################################################################
-# FUNCTION: run_all_tasks
-# Description: Run standard setup tasks only. Excludes DietPi upgrades, PiVPN,
-#              Docker removal, backup restore, UFW, and verification helpers.
-###############################################################################
-run_all_tasks() {
-    system_update_upgrade
-    update_sudoers
-    configure_ssh
-    generate_ssh_key
-    create_bashrc
-    create_bash_aliases
-    install_configure_snmpd
-    install_docker_repository
-    install_docker_ce
-    clone_fastfetch_repository
-    check_reboot_required
-    summary_report
-}
-
-###############################################################################
 # FUNCTION: menu
 # Description: Interactive menu exposing standard setup, optional operations,
 #              verification helpers, and exit handling.
@@ -2554,32 +2498,31 @@ menu() {
         echo "   5) Self-update hostctl"
         echo ""
         echo "Setup and configuration:"
-        echo "   6) Run all standard tasks"
-        echo "   7) Update sudoers"
-        echo "   8) Configure SSH"
-        echo "   9) Generate SSH key"
-        echo "  10) Distribute SSH key to other hosts"
-        echo "  11) Create/Update .bashrc"
-        echo "  12) Create/Update .bash_aliases"
-        echo "  13) Configure UFW firewall"
+        echo "   6) Update sudoers"
+        echo "   7) Configure SSH"
+        echo "   8) Generate SSH key"
+        echo "   9) Distribute SSH key to other hosts"
+        echo "  10) Create/Update .bashrc"
+        echo "  11) Create/Update .bash_aliases"
+        echo "  12) Configure UFW firewall"
         echo ""
         echo "Services and applications:"
-        echo "  14) Install and configure SNMPD"
-        echo "  15) Remove SNMPD"
-        echo "  16) Install Docker official repo"
-        echo "  17) Install Docker and relevant tools"
-        echo "  18) Docker maintenance (prune / Compose update)"
-        echo "  19) Remove Docker and relevant tools"
-        echo "  20) Install PiVPN"
-        echo "  21) Install Wake-on-LAN tools"
-        echo "  22) Clone/update the update-fastfetch repo"
+        echo "  13) Install and configure SNMPD"
+        echo "  14) Remove SNMPD"
+        echo "  15) Install Docker official repo"
+        echo "  16) Install Docker and relevant tools"
+        echo "  17) Docker maintenance (prune / Compose update)"
+        echo "  18) Remove Docker and relevant tools"
+        echo "  19) Install PiVPN"
+        echo "  20) Install Wake-on-LAN tools"
+        echo "  21) Clone/update the update-fastfetch repo"
         echo ""
         echo "Status and recovery:"
-        echo "  23) Run health check"
-        echo "  24) Show important paths"
-        echo "  25) Show current profile config"
-        echo "  26) Show available backups"
-        echo "  27) Restore from backup"
+        echo "  22) Run health check"
+        echo "  23) Show important paths"
+        echo "  24) Show current profile config"
+        echo "  25) Show available backups"
+        echo "  26) Restore from backup"
         echo ""
         echo "   0) Exit"
 
@@ -2591,28 +2534,27 @@ menu() {
             3) run_menu_action "DietPi: Bullseye -> Bookworm" dietpi_bullseye_to_bookworm ;;
             4) run_menu_action "DietPi: Bookworm -> Trixie" dietpi_bookworm_to_trixie ;;
             5) run_menu_action "Self-update hostctl" self_update ;;
-            6) run_menu_action "Run all standard tasks" run_all_tasks ;;
-            7) run_menu_action "Update sudoers" update_sudoers ;;
-            8) run_menu_action "Configure SSH" configure_ssh ;;
-            9) run_menu_action "Generate SSH key" generate_ssh_key ;;
-            10) run_menu_action "Distribute SSH key to other hosts" distribute_ssh_key ;;
-            11) run_menu_action "Create/Update .bashrc" create_bashrc ;;
-            12) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
-            13) run_menu_action "Configure UFW firewall" configure_ufw ;;
-            14) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
-            15) run_menu_action "Remove SNMPD" remove_snmpd ;;
-            16) run_menu_action "Install Docker official repo" install_docker_repository ;;
-            17) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
-            18) run_menu_action "Docker maintenance" docker_maintenance ;;
-            19) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
-            20) run_menu_action "Install PiVPN" install_pivpn ;;
-            21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
-            22) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
-            23) run_menu_action "Run health check" run_health_check ;;
-            24) run_menu_action "Show important paths" show_important_paths ;;
-            25) run_menu_action "Show current profile config" show_current_profile_config ;;
-            26) run_menu_action "Show available backups" show_available_backups ;;
-            27) run_menu_action "Restore from backup" restore_from_backup ;;
+            6) run_menu_action "Update sudoers" update_sudoers ;;
+            7) run_menu_action "Configure SSH" configure_ssh ;;
+            8) run_menu_action "Generate SSH key" generate_ssh_key ;;
+            9) run_menu_action "Distribute SSH key to other hosts" distribute_ssh_key ;;
+            10) run_menu_action "Create/Update .bashrc" create_bashrc ;;
+            11) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
+            12) run_menu_action "Configure UFW firewall" configure_ufw ;;
+            13) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
+            14) run_menu_action "Remove SNMPD" remove_snmpd ;;
+            15) run_menu_action "Install Docker official repo" install_docker_repository ;;
+            16) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
+            17) run_menu_action "Docker maintenance" docker_maintenance ;;
+            18) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
+            19) run_menu_action "Install PiVPN" install_pivpn ;;
+            20) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
+            21) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
+            22) run_menu_action "Run health check" run_health_check ;;
+            23) run_menu_action "Show important paths" show_important_paths ;;
+            24) run_menu_action "Show current profile config" show_current_profile_config ;;
+            25) run_menu_action "Show available backups" show_available_backups ;;
+            26) run_menu_action "Restore from backup" restore_from_backup ;;
             0)
                 log "Script execution completed."
                 log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
