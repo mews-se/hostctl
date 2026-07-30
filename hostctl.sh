@@ -24,7 +24,7 @@
 #     - SNMPD install (profile-aware) & removal
 #     - Docker install & removal
 #     - Docker maintenance (prune / Compose stack updates)
-#     - PiVPN install + client configs + QR codes
+#     - PiVPN install + client configs + QR codes & removal
 #     - DietPi upgrade helpers
 #     - Fastfetch repo clone/update
 #     - Backup & restore helpers
@@ -73,7 +73,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.30-5"
+SCRIPT_VERSION="v2026.07.30-6"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -1623,6 +1623,50 @@ create_pivpn_clients() {
 }
 
 ###############################################################################
+# FUNCTION: remove_pivpn
+# Description: Run PiVPN's own uninstaller (pivpn -u) in a PTY. The uninstaller
+#              is interactive, like the installer: it asks which dependencies
+#              to remove and deletes the VPN server configuration.
+###############################################################################
+remove_pivpn() {
+    log "Removing PiVPN."
+
+    if ! command -v pivpn >/dev/null 2>&1; then
+        log "PiVPN is not installed. Nothing to remove."
+        return 0
+    fi
+
+    if ! command -v script >/dev/null 2>&1; then
+        log "'script' command is required for PiVPN uninstaller PTY handling." "ERROR"
+        return 1
+    fi
+
+    echo
+    echo "This runs PiVPN's own uninstaller (pivpn -u)."
+    echo "It will ask which dependencies to remove and deletes the VPN server"
+    echo "configuration. Client configs may also be removed."
+    read -rp "Run the PiVPN uninstaller? [y/N]: " response < /dev/tty
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+        log "PiVPN removal cancelled."
+        return 0
+    fi
+
+    # The uninstaller draws whiptail dialogs and prompts per dependency, so it
+    # gets the same PTY treatment as the installer.
+    if ! script -qec "pivpn -u" /dev/null; then
+        log "PiVPN uninstaller failed or was cancelled." "ERROR"
+        return 1
+    fi
+
+    if command -v pivpn >/dev/null 2>&1; then
+        log "pivpn command is still present after the uninstaller ran; check manually." "WARN"
+        return 1
+    fi
+
+    log "PiVPN removed successfully."
+}
+
+###############################################################################
 # FUNCTION: install_docker_ce
 # Description: Install Docker Engine and related tools
 ###############################################################################
@@ -2607,15 +2651,16 @@ menu() {
         echo "  17) Docker maintenance (prune / Compose update)"
         echo "  18) Remove Docker and relevant tools"
         echo "  19) Install PiVPN"
-        echo "  20) Install Wake-on-LAN tools"
-        echo "  21) Clone/update the update-fastfetch repo"
+        echo "  20) Remove PiVPN"
+        echo "  21) Install Wake-on-LAN tools"
+        echo "  22) Clone/update the update-fastfetch repo"
         echo ""
         echo "Status and recovery:"
-        echo "  22) Run health check"
-        echo "  23) Show important paths"
-        echo "  24) Show current profile config"
-        echo "  25) Show available backups"
-        echo "  26) Restore from backup"
+        echo "  23) Run health check"
+        echo "  24) Show important paths"
+        echo "  25) Show current profile config"
+        echo "  26) Show available backups"
+        echo "  27) Restore from backup"
         echo ""
         echo "   0) Exit"
 
@@ -2641,13 +2686,14 @@ menu() {
             17) run_menu_action "Docker maintenance" docker_maintenance ;;
             18) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
             19) run_menu_action "Install PiVPN" install_pivpn ;;
-            20) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
-            21) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
-            22) run_menu_action "Run health check" run_health_check ;;
-            23) run_menu_action "Show important paths" show_important_paths ;;
-            24) run_menu_action "Show current profile config" show_current_profile_config ;;
-            25) run_menu_action "Show available backups" show_available_backups ;;
-            26) run_menu_action "Restore from backup" restore_from_backup ;;
+            20) run_menu_action "Remove PiVPN" remove_pivpn ;;
+            21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
+            22) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
+            23) run_menu_action "Run health check" run_health_check ;;
+            24) run_menu_action "Show important paths" show_important_paths ;;
+            25) run_menu_action "Show current profile config" show_current_profile_config ;;
+            26) run_menu_action "Show available backups" show_available_backups ;;
+            27) run_menu_action "Restore from backup" restore_from_backup ;;
             0)
                 log "Script execution completed."
                 log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
