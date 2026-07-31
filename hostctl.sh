@@ -188,6 +188,20 @@ wait_for_apt() {
 }
 
 ###############################################################################
+# FUNCTION: mark_apt_lists_fresh
+# Description: Record a successful apt-get update in the standard Debian stamp
+#              file. The list files themselves keep their old mtimes when the
+#              mirrors respond 304 Not Modified, so a dedicated stamp is the
+#              only reliable freshness signal.
+###############################################################################
+APT_UPDATE_STAMP="/var/lib/apt/periodic/update-success-stamp"
+
+mark_apt_lists_fresh() {
+    sudo mkdir -p "$(dirname "$APT_UPDATE_STAMP")" 2>/dev/null || return 0
+    sudo touch "$APT_UPDATE_STAMP" 2>/dev/null || true
+}
+
+###############################################################################
 # FUNCTION: refresh_apt_package_lists
 # Description: Refresh APT package indexes once during startup, before dependency
 #              checks/installations. This intentionally does not upgrade packages.
@@ -197,10 +211,11 @@ wait_for_apt() {
 refresh_apt_package_lists() {
     local max_age_minutes=30
 
-    # apt-get update stamps the files in /var/lib/apt/lists on success, so a
-    # sufficiently recent file there means the indexes are already current.
-    # If the check cannot tell (e.g. empty directory), fall through to update.
-    if find /var/lib/apt/lists -maxdepth 1 -type f -mmin "-${max_age_minutes}" 2>/dev/null | grep -q .; then
+    # Fresh means either our own stamp from a recent successful update, or a
+    # recently written list file (covers updates done by apt-daily or other
+    # tools). If neither can tell, fall through to the update.
+    if find "$APT_UPDATE_STAMP" -mmin "-${max_age_minutes}" 2>/dev/null | grep -q . || \
+       find /var/lib/apt/lists -maxdepth 1 -type f -mmin "-${max_age_minutes}" 2>/dev/null | grep -q .; then
         log "APT package indexes were refreshed within the last ${max_age_minutes} minutes. Skipping update."
         return 0
     fi
@@ -208,6 +223,7 @@ refresh_apt_package_lists() {
     log "Refreshing APT package indexes."
     wait_for_apt
     if sudo apt-get update; then
+        mark_apt_lists_fresh
         log "APT package indexes refreshed successfully."
     else
         log "Failed to refresh APT package indexes. Check network and APT sources." "ERROR"
@@ -622,6 +638,7 @@ system_update_upgrade() {
         log "System update failed. Check network and APT sources." "ERROR"
         return 1
     fi
+    mark_apt_lists_fresh
 
     wait_for_apt
     if ! sudo apt-get dist-upgrade -y; then
