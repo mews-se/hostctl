@@ -209,7 +209,7 @@ mark_apt_lists_fresh() {
 #              restarting the script does not rerun apt-get update every time.
 ###############################################################################
 refresh_apt_package_lists() {
-    local max_age_minutes=30
+    local max_age_minutes=60
 
     # Fresh means either our own stamp from a recent successful update, or a
     # recently written list file (covers updates done by apt-daily or other
