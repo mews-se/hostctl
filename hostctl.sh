@@ -74,7 +74,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.31-3"
+SCRIPT_VERSION="v2026.07.31-4"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -1274,6 +1274,7 @@ alias fanoff="sudo systemctl stop fancontrol.service"
 alias fanon="sudo systemctl start fancontrol.service"
 alias ff="fastfetch -c all.jsonc"
 alias flight="ssh root@10.0.1.12"
+alias hostctl="rm -rf ~/hostctl ~/startchanges && git clone https://github.com/mews-se/hostctl.git ~/hostctl"
 alias kodipi="ssh dietpi@10.0.0.7"
 alias london="ssh dietpi@london.stockzell.se"
 alias mm="ssh martin@10.0.0.11"
