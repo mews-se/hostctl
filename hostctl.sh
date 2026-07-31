@@ -27,6 +27,7 @@
 #     - PiVPN install + client configs + QR codes & removal
 #     - DietPi upgrade helpers
 #     - Fastfetch repo clone/update
+#     - geodebtest repo clone/update (Debian mirror benchmark)
 #     - Backup & restore helpers
 #     - Health check
 #     - Important paths display
@@ -73,7 +74,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.30-6"
+SCRIPT_VERSION="v2026.07.31"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -2130,6 +2131,57 @@ EOF
 }
 
 ###############################################################################
+# FUNCTION: clone_geodebtest_repository
+# Description: Clone/update the geodebtest repo (Debian mirror benchmark:
+#              autodetects country, fetches the official mirror list, ranks by
+#              ping/TTFB/download speed) and optionally run it right away.
+###############################################################################
+clone_geodebtest_repository() {
+    log "Preparing geodebtest repository."
+
+    local REPO_URL="https://github.com/mews-se/geodebtest.git"
+    local DEST_DIR="$USER_HOME/geodebtest"
+    local SCRIPT_PATH="$DEST_DIR/geodebtest.sh"
+    local response
+
+    if [ -d "$DEST_DIR/.git" ]; then
+        log "Repository already exists at $DEST_DIR. Pulling latest changes."
+        sudo -u "$SUDO_USER" git -C "$DEST_DIR" pull --ff-only || {
+            log "Failed to update existing repository at $DEST_DIR." "ERROR"
+            return 1
+        }
+    elif [ -d "$DEST_DIR" ]; then
+        log "Directory $DEST_DIR exists but is not a git repository. Leaving it unchanged." "ERROR"
+        return 1
+    else
+        sudo -u "$SUDO_USER" git clone "$REPO_URL" "$DEST_DIR" || {
+            log "Failed to clone repository to $DEST_DIR." "ERROR"
+            return 1
+        }
+        log "Repository cloned successfully to $DEST_DIR."
+    fi
+
+    if [ ! -f "$SCRIPT_PATH" ]; then
+        log "geodebtest.sh not found in the repository." "ERROR"
+        return 1
+    fi
+    sudo -u "$SUDO_USER" chmod 0750 "$SCRIPT_PATH"
+
+    log "geodebtest ready at $SCRIPT_PATH"
+
+    echo
+    read -rp "Run the Debian mirror benchmark now? [y/N]: " response < /dev/tty
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        # The benchmark is read-only and needs no root; run it as the user.
+        if ! sudo -u "$SUDO_USER" bash "$SCRIPT_PATH" < /dev/tty; then
+            log "geodebtest run failed." "ERROR"
+            return 1
+        fi
+        log "geodebtest benchmark completed."
+    fi
+}
+
+###############################################################################
 # FUNCTION: show_available_backups
 # Description: Show latest backup files for important configuration files
 ###############################################################################
@@ -2398,6 +2450,12 @@ run_health_check() {
         echo "[WARN]  update-fastfetch repository missing"
     fi
 
+    if [ -d "$user_home/geodebtest" ]; then
+        echo "[OK]    geodebtest repository exists"
+    else
+        echo "[WARN]  geodebtest repository missing"
+    fi
+
     if command -v wakeonlan >/dev/null 2>&1; then
         echo "[OK]    wakeonlan command available"
     else
@@ -2502,6 +2560,9 @@ show_important_paths() {
     echo
     echo "Fastfetch:"
     echo "  $user_home/update-fastfetch"
+    echo
+    echo "geodebtest:"
+    echo "  $user_home/geodebtest"
     echo
     echo "Wake-on-LAN:"
     echo "  $(command -v wakeonlan 2>/dev/null || echo 'not installed')"
@@ -2654,13 +2715,14 @@ menu() {
         echo "  20) Remove PiVPN"
         echo "  21) Install Wake-on-LAN tools"
         echo "  22) Clone/update the update-fastfetch repo"
+        echo "  23) Clone/update geodebtest (Debian mirror benchmark)"
         echo ""
         echo "Status and recovery:"
-        echo "  23) Run health check"
-        echo "  24) Show important paths"
-        echo "  25) Show current profile config"
-        echo "  26) Show available backups"
-        echo "  27) Restore from backup"
+        echo "  24) Run health check"
+        echo "  25) Show important paths"
+        echo "  26) Show current profile config"
+        echo "  27) Show available backups"
+        echo "  28) Restore from backup"
         echo ""
         echo "   0) Exit"
 
@@ -2689,11 +2751,12 @@ menu() {
             20) run_menu_action "Remove PiVPN" remove_pivpn ;;
             21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
             22) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
-            23) run_menu_action "Run health check" run_health_check ;;
-            24) run_menu_action "Show important paths" show_important_paths ;;
-            25) run_menu_action "Show current profile config" show_current_profile_config ;;
-            26) run_menu_action "Show available backups" show_available_backups ;;
-            27) run_menu_action "Restore from backup" restore_from_backup ;;
+            23) run_menu_action "Clone/update geodebtest" clone_geodebtest_repository ;;
+            24) run_menu_action "Run health check" run_health_check ;;
+            25) run_menu_action "Show important paths" show_important_paths ;;
+            26) run_menu_action "Show current profile config" show_current_profile_config ;;
+            27) run_menu_action "Show available backups" show_available_backups ;;
+            28) run_menu_action "Restore from backup" restore_from_backup ;;
             0)
                 log "Script execution completed."
                 log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
