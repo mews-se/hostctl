@@ -74,7 +74,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.31-5"
+SCRIPT_VERSION="v2026.08.01"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -290,12 +290,16 @@ prune_old_backups() {
 
 ###############################################################################
 # FUNCTION: find_latest_backup
-# Description: Return latest timestamped backup for a target file
+# Description: Return latest timestamped backup for a target file. Backups are
+#              searched next to the file by default; an explicit directory can
+#              be given for tools that keep their backups elsewhere (geodebtest
+#              stores its APT source backups under ~/geodebtest/backups).
 ###############################################################################
 find_latest_backup() {
     local target_file="$1"
+    local search_dir="${2:-$(dirname "$target_file")}"
 
-    find "$(dirname "$target_file")" -maxdepth 1 -type f \
+    find "$search_dir" -maxdepth 1 -type f \
         -name "$(basename "$target_file").bak_*" -printf '%T@ %p\n' 2>/dev/null | \
         sort -nr | head -n1 | cut -d' ' -f2-
 }
@@ -2156,6 +2160,24 @@ show_available_backups() {
             echo "Latest backup: None found"
         fi
     done
+
+    # APT sources are backed up by geodebtest into its own directory.
+    local apt_backup_dir="$user_home/geodebtest/backups"
+    local apt_files=(
+        "/etc/apt/sources.list"
+        "/etc/apt/sources.list.d/debian.sources"
+    )
+    for file in "${apt_files[@]}"; do
+        echo
+        echo "File: $file (backups in $apt_backup_dir)"
+        latest_backup="$(find_latest_backup "$file" "$apt_backup_dir" || true)"
+
+        if [ -n "$latest_backup" ]; then
+            echo "Latest backup: $latest_backup"
+        else
+            echo "Latest backup: None found"
+        fi
+    done
 }
 
 ###############################################################################
@@ -2168,6 +2190,10 @@ restore_from_backup() {
     local user_home="$USER_HOME"
     local target_file latest_backup choice response
     local current_backup=""
+    # geodebtest keeps its APT source backups in its own directory, because
+    # APT complains about unknown files inside sources.list.d.
+    local apt_backup_dir=""
+    local geodebtest_backups="$user_home/geodebtest/backups"
 
     echo "Select file to restore:"
     echo "  1) /etc/sudoers.d/99-sudo-nopasswd"
@@ -2175,7 +2201,9 @@ restore_from_backup() {
     echo "  3) /etc/snmp/snmpd.conf"
     echo "  4) $user_home/.bashrc"
     echo "  5) $user_home/.bash_aliases"
-    echo "  6) Cancel"
+    echo "  6) /etc/apt/sources.list (geodebtest backup)"
+    echo "  7) /etc/apt/sources.list.d/debian.sources (geodebtest backup)"
+    echo "  8) Cancel"
 
     read -rp "Enter your choice: " choice < /dev/tty
 
@@ -2186,6 +2214,14 @@ restore_from_backup() {
         4) target_file="$user_home/.bashrc" ;;
         5) target_file="$user_home/.bash_aliases" ;;
         6)
+            target_file="/etc/apt/sources.list"
+            apt_backup_dir="$geodebtest_backups"
+            ;;
+        7)
+            target_file="/etc/apt/sources.list.d/debian.sources"
+            apt_backup_dir="$geodebtest_backups"
+            ;;
+        8)
             log "Restore cancelled."
             return 0
             ;;
@@ -2195,7 +2231,7 @@ restore_from_backup() {
             ;;
     esac
 
-    latest_backup="$(find_latest_backup "$target_file" || true)"
+    latest_backup="$(find_latest_backup "$target_file" ${apt_backup_dir:+"$apt_backup_dir"} || true)"
 
     if [ -z "$latest_backup" ]; then
         log "No backup found for $target_file" "ERROR"
@@ -2228,10 +2264,22 @@ restore_from_backup() {
     esac
 
     if [ -f "$target_file" ]; then
-        current_backup="$(backup_file "$target_file")" || {
-            log "Could not preserve the current file before restore: $target_file" "ERROR"
-            return 1
-        }
+        if [ -n "$apt_backup_dir" ]; then
+            # The pre-restore copy of an APT source must not live next to the
+            # file (APT scans sources.list.d), so use geodebtest's backup
+            # directory and naming; geodebtest prunes it on its next apply.
+            sudo mkdir -p "$apt_backup_dir"
+            current_backup="${apt_backup_dir}/$(basename "$target_file").bak_$(date +%Y%m%d_%H%M%S)"
+            if ! sudo cp -p "$target_file" "$current_backup"; then
+                log "Could not preserve the current file before restore: $target_file" "ERROR"
+                return 1
+            fi
+        else
+            current_backup="$(backup_file "$target_file")" || {
+                log "Could not preserve the current file before restore: $target_file" "ERROR"
+                return 1
+            }
+        fi
     fi
 
     rollback_restored_file() {
@@ -2278,6 +2326,19 @@ restore_from_backup() {
             else
                 log "snmpd not active; restart manually if needed." "WARN"
             fi
+            ;;
+        "/etc/apt/sources.list"|"/etc/apt/sources.list.d/debian.sources")
+            wait_for_apt
+            if ! sudo apt-get update; then
+                rollback_restored_file
+                wait_for_apt
+                sudo apt-get update ||
+                    log "apt-get update failed even after rollback. Manual intervention required." "ERROR"
+                log "apt-get update failed with the restored sources; previous file restored." "ERROR"
+                return 1
+            fi
+            mark_apt_lists_fresh
+            log "APT sources restored and package lists refreshed."
             ;;
     esac
 
