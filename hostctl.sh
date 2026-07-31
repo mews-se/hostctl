@@ -33,7 +33,7 @@
 #     - Important paths display
 #     - Profile configuration display
 #     - Wake-on-LAN tools
-#     - Optional UFW configuration
+#     - Optional UFW configuration (SSH + PiVPN port allowed)
 #     - Reboot-required detection
 #     - Self-update from GitHub
 #     - Logging to ~/hostctl.log (with rotation)
@@ -74,7 +74,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.31-2"
+SCRIPT_VERSION="v2026.07.31-3"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -2630,6 +2630,7 @@ show_current_profile_config() {
 # FUNCTION: configure_ufw
 # Description: Optionally install and configure a conservative UFW baseline:
 #              deny inbound traffic, allow outbound traffic, and keep SSH open.
+#              When PiVPN is configured, its VPN port is allowed as well.
 ###############################################################################
 configure_ufw() {
     log "Configuring UFW firewall."
@@ -2661,8 +2662,34 @@ configure_ufw() {
         fi
     fi
 
+    # Allow the PiVPN VPN port when PiVPN is configured on this host. The
+    # port and protocol are read from PiVPN's own setupVars.conf instead of
+    # being hardcoded (WireGuard default is 51820/udp, OpenVPN 1194/udp).
+    local pivpn_setupvars pivpn_port pivpn_proto pivpn_rule=""
+    for pivpn_setupvars in /etc/pivpn/wireguard/setupVars.conf /etc/pivpn/openvpn/setupVars.conf; do
+        [ -f "$pivpn_setupvars" ] || continue
+        pivpn_port="$(grep -m1 '^pivpnPORT=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc '0-9')"
+        pivpn_proto="$(grep -m1 '^pivpnPROTO=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc 'a-z')"
+        pivpn_proto="${pivpn_proto:-udp}"
+        if [ -n "$pivpn_port" ]; then
+            if sudo ufw allow "${pivpn_port}/${pivpn_proto}"; then
+                pivpn_rule="${pivpn_port}/${pivpn_proto}"
+                log "UFW allow rule added for PiVPN: $pivpn_rule"
+            else
+                log "Failed to add UFW rule for PiVPN port ${pivpn_port}/${pivpn_proto}." "WARN"
+            fi
+        fi
+    done
+    if [ -z "$pivpn_rule" ] && command -v pivpn >/dev/null 2>&1; then
+        log "PiVPN is installed but its port could not be determined; add the UFW rule manually." "WARN"
+    fi
+
     echo
-    echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH."
+    if [ -n "$pivpn_rule" ]; then
+        echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH, allow PiVPN ($pivpn_rule)."
+    else
+        echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH."
+    fi
     read -rp "Enable UFW now? [y/N]: " enable_ufw < /dev/tty
     if [[ "$enable_ufw" =~ ^[Yy]$ ]]; then
         if sudo ufw --force enable; then

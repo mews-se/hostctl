@@ -1,6 +1,6 @@
 # Automated System Configuration Script
 
-![Version](https://img.shields.io/badge/version-v2026.07.31--2-informational)
+![Version](https://img.shields.io/badge/version-v2026.07.31--3-informational)
 ![License](https://img.shields.io/badge/license-Unlicense-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Debian%2FDietPi-lightgrey)
 ![Shell](https://img.shields.io/badge/shell-bash-blue)
@@ -25,7 +25,7 @@ and returning failed actions safely to the menu.
 - Ed25519 SSH key generation
 - SSH key distribution to other hosts via `ssh-copy-id`
 - Atomic `.bashrc` recreation and interactive `.bash_aliases` merge
-- UFW firewall baseline
+- UFW firewall baseline (SSH allowed; PiVPN port auto-allowed when configured)
 
 ### Services and applications
 - Profile-based SNMPD installation, configuration, and removal
