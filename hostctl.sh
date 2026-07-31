@@ -191,8 +191,20 @@ wait_for_apt() {
 # FUNCTION: refresh_apt_package_lists
 # Description: Refresh APT package indexes once during startup, before dependency
 #              checks/installations. This intentionally does not upgrade packages.
+#              The refresh is skipped when the indexes are already fresh, so
+#              restarting the script does not rerun apt-get update every time.
 ###############################################################################
 refresh_apt_package_lists() {
+    local max_age_minutes=30
+
+    # apt-get update stamps the files in /var/lib/apt/lists on success, so a
+    # sufficiently recent file there means the indexes are already current.
+    # If the check cannot tell (e.g. empty directory), fall through to update.
+    if find /var/lib/apt/lists -maxdepth 1 -type f -mmin "-${max_age_minutes}" 2>/dev/null | grep -q .; then
+        log "APT package indexes were refreshed within the last ${max_age_minutes} minutes. Skipping update."
+        return 0
+    fi
+
     log "Refreshing APT package indexes."
     wait_for_apt
     if sudo apt-get update; then
