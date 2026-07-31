@@ -33,7 +33,7 @@
 #     - Important paths display
 #     - Profile configuration display
 #     - Wake-on-LAN tools
-#     - Optional UFW configuration (SSH + PiVPN port allowed)
+#     - Optional UFW configuration (SSH + PiVPN/SNMP ports allowed)
 #     - Reboot-required detection
 #     - Self-update from GitHub
 #     - Logging to ~/hostctl.log (with rotation)
@@ -2652,7 +2652,8 @@ show_current_profile_config() {
 # FUNCTION: configure_ufw
 # Description: Optionally install and configure a conservative UFW baseline:
 #              deny inbound traffic, allow outbound traffic, and keep SSH open.
-#              When PiVPN is configured, its VPN port is allowed as well.
+#              When PiVPN or SNMPD is configured on the host, their ports are
+#              allowed as well.
 ###############################################################################
 configure_ufw() {
     log "Configuring UFW firewall."
@@ -2706,12 +2707,33 @@ configure_ufw() {
         log "PiVPN is installed but its port could not be determined; add the UFW rule manually." "WARN"
     fi
 
-    echo
-    if [ -n "$pivpn_rule" ]; then
-        echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH, allow PiVPN ($pivpn_rule)."
-    else
-        echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH."
+    # Allow SNMP when snmpd is installed on this host, so monitoring polls
+    # are not cut off by the baseline. The port is read from the agentaddress
+    # line in snmpd.conf when possible (the hostctl default is udp:161).
+    local snmp_rule=""
+    if dpkg-query -W -f='${db:Status-Abbrev}' snmpd 2>/dev/null | grep -q '^i'; then
+        local snmp_port
+        snmp_port="$(awk '$1 == "agentaddress" {print $2}' /etc/snmp/snmpd.conf 2>/dev/null | \
+            grep -oE '[0-9]+$' | head -n1)"
+        snmp_port="${snmp_port:-161}"
+        if sudo ufw allow "${snmp_port}/udp"; then
+            snmp_rule="${snmp_port}/udp"
+            log "UFW allow rule added for SNMP: $snmp_rule"
+        else
+            log "Failed to add UFW rule for SNMP port ${snmp_port}/udp." "WARN"
+        fi
     fi
+
+    local extras=""
+    if [ -n "$pivpn_rule" ]; then
+        extras+=", allow PiVPN ($pivpn_rule)"
+    fi
+    if [ -n "$snmp_rule" ]; then
+        extras+=", allow SNMP ($snmp_rule)"
+    fi
+
+    echo
+    echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH${extras}."
     read -rp "Enable UFW now? [y/N]: " enable_ufw < /dev/tty
     if [[ "$enable_ufw" =~ ^[Yy]$ ]]; then
         if sudo ufw --force enable; then
