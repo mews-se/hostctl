@@ -27,7 +27,7 @@
 #     - PiVPN install + client configs + QR codes & removal
 #     - DietPi upgrade helpers
 #     - Fastfetch repo clone/update
-#     - geodebtest repo clone/update (Debian mirror benchmark)
+#     - geodebtest repo clone/update (Debian mirror benchmark + APT mirror apply)
 #     - Backup & restore helpers
 #     - Health check
 #     - Important paths display
@@ -74,7 +74,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.31"
+SCRIPT_VERSION="v2026.07.31-2"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -2135,6 +2135,8 @@ EOF
 # Description: Clone/update the geodebtest repo (Debian mirror benchmark:
 #              autodetects country, fetches the official mirror list, ranks by
 #              ping/TTFB/download speed) and optionally run it right away.
+#              Since v2026.07.31-2 the benchmark can also apply the chosen
+#              mirror to the APT sources, with its own backup and rollback.
 ###############################################################################
 clone_geodebtest_repository() {
     log "Preparing geodebtest repository."
@@ -2170,10 +2172,14 @@ clone_geodebtest_repository() {
     log "geodebtest ready at $SCRIPT_PATH"
 
     echo
+    echo "After the benchmark, geodebtest offers to apply the mirror you pick"
+    echo "to the APT sources (press Enter at its prompt to skip). It backs up"
+    echo "and validates the sources itself, and rolls back on failure."
     read -rp "Run the Debian mirror benchmark now? [y/N]: " response < /dev/tty
     if [[ "$response" =~ ^[Yy]$ ]]; then
-        # The benchmark is read-only and needs no root; run it as the user.
-        if ! sudo -u "$SUDO_USER" bash "$SCRIPT_PATH" < /dev/tty; then
+        # Run as root: the measurement itself is read-only, but the optional
+        # apply-to-APT step at the end requires root to edit the sources.
+        if ! bash "$SCRIPT_PATH" < /dev/tty; then
             log "geodebtest run failed." "ERROR"
             return 1
         fi
