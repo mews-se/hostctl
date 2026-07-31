@@ -1905,18 +1905,6 @@ docker_compose_update() {
 remove_docker_and_tools() {
     log "Removing Docker CE and related tools."
 
-    local confirmation
-    echo
-    echo "WARNING: This permanently removes Docker packages and deletes:"
-    echo "  /var/lib/docker"
-    echo "  /var/lib/containerd"
-    echo "This includes local containers, images, volumes, and build data."
-    read -rp "Type REMOVE to continue: " confirmation < /dev/tty
-    if [ "$confirmation" != "REMOVE" ]; then
-        log "Docker removal cancelled."
-        return 0
-    fi
-
     local docker_packages=(
         docker-ce
         docker-ce-cli
@@ -1936,6 +1924,39 @@ remove_docker_and_tools() {
             installed_packages+=("$package")
         fi
     done
+
+    local has_data=0
+    if [ -d /var/lib/docker ] || [ -d /var/lib/containerd ]; then
+        has_data=1
+    fi
+
+    # Only demand the typed REMOVE confirmation when something destructive is
+    # actually about to happen. On a host where the packages and data are
+    # already gone, this action just cleans up leftovers (APT repository
+    # files, the docker group and its memberships) and a plain yes suffices.
+    local confirmation
+    if [ "${#installed_packages[@]}" -eq 0 ] && [ "$has_data" -eq 0 ]; then
+        echo
+        echo "Docker is not installed and no data directories remain."
+        echo "This cleans up leftovers: Docker APT repository files, the docker"
+        echo "group, and its group memberships."
+        read -rp "Clean up Docker leftovers? [y/N]: " confirmation < /dev/tty
+        if [[ ! "$confirmation" =~ ^[Yy]$ ]]; then
+            log "Docker removal cancelled."
+            return 0
+        fi
+    else
+        echo
+        echo "WARNING: This permanently removes Docker packages and deletes:"
+        echo "  /var/lib/docker"
+        echo "  /var/lib/containerd"
+        echo "This includes local containers, images, volumes, and build data."
+        read -rp "Type REMOVE to continue: " confirmation < /dev/tty
+        if [ "$confirmation" != "REMOVE" ]; then
+            log "Docker removal cancelled."
+            return 0
+        fi
+    fi
 
     if [ "${#installed_packages[@]}" -gt 0 ]; then
         wait_for_apt
