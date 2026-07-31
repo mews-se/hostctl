@@ -74,7 +74,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.07.31-4"
+SCRIPT_VERSION="v2026.07.31-5"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -1988,7 +1988,11 @@ install_wakeonlan() {
 
 ###############################################################################
 # FUNCTION: clone_fastfetch_repository
-# Description: Clone/update update-fastfetch and write consolidated updater script
+# Description: Clone/update the update-fastfetch repository and optionally run
+#              the updater. The repository's own updatefastfetch.sh is the
+#              source of truth; earlier hostctl versions overwrote it with an
+#              embedded copy, so any such local changes are discarded before
+#              updating.
 ###############################################################################
 clone_fastfetch_repository() {
     log "Preparing update-fastfetch repository."
@@ -1996,9 +2000,13 @@ clone_fastfetch_repository() {
     local REPO_URL="https://github.com/mews-se/update-fastfetch.git"
     local DEST_DIR="$USER_HOME/update-fastfetch"
     local SCRIPT_PATH="$DEST_DIR/updatefastfetch.sh"
+    local response
 
     if [ -d "$DEST_DIR/.git" ]; then
-        log "Repository already exists at $DEST_DIR. Pulling latest changes."
+        log "Repository already exists at $DEST_DIR. Updating."
+        # Discard local modifications (earlier hostctl versions wrote over
+        # updatefastfetch.sh, which makes a plain pull abort).
+        sudo -u "$SUDO_USER" git -C "$DEST_DIR" checkout -- . 2>/dev/null || true
         sudo -u "$SUDO_USER" git -C "$DEST_DIR" pull --ff-only || {
             log "Failed to update existing repository at $DEST_DIR." "ERROR"
             return 1
@@ -2014,121 +2022,23 @@ clone_fastfetch_repository() {
         log "Repository cloned successfully to $DEST_DIR."
     fi
 
-    if ! cat <<'EOF' | sudo -u "$SUDO_USER" tee "$SCRIPT_PATH" >/dev/null
-#!/usr/bin/env bash
-#
-# updatefastfetch.sh
-#
-# Consolidated Fastfetch updater for Debian/DietPi-style systems.
-# - Detects the correct architecture automatically
-# - Downloads the latest matching .deb package from GitHub releases
-# - Can be run as a normal user; uses sudo only for installation
-#
-
-set -euo pipefail
-
-log() {
-    printf '[%s] %s\n' "$(date '+%F %T')" "$1"
-}
-
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        printf 'Missing required command: %s\n' "$1" >&2
-        exit 1
-    }
-}
-
-detect_architecture() {
-    local dpkg_arch=""
-    local uname_arch=""
-
-    if command -v dpkg >/dev/null 2>&1; then
-        dpkg_arch="$(dpkg --print-architecture 2>/dev/null || true)"
-    fi
-
-    case "$dpkg_arch" in
-        amd64) printf '%s\n' "linux-amd64.deb"; return 0 ;;
-        arm64) printf '%s\n' "linux-aarch64.deb"; return 0 ;;
-        armhf) printf '%s\n' "linux-armv7l.deb"; return 0 ;;
-    esac
-
-    uname_arch="$(uname -m)"
-    case "$uname_arch" in
-        x86_64) printf '%s\n' "linux-amd64.deb" ;;
-        aarch64|arm64) printf '%s\n' "linux-aarch64.deb" ;;
-        armv7l|armv7*|armhf|arm7l) printf '%s\n' "linux-armv7l.deb" ;;
-        *)
-            printf 'Unsupported architecture: %s\n' "$uname_arch" >&2
-            exit 1
-            ;;
-    esac
-}
-
-get_release_url() {
-    local asset_name="$1"
-
-    curl -fsSL "https://api.github.com/repos/fastfetch-cli/fastfetch/releases/latest" | \
-        grep '"browser_download_url":' | \
-        grep "$asset_name" | \
-        cut -d '"' -f 4 | \
-        head -n 1
-}
-
-main() {
-    require_cmd curl
-    require_cmd grep
-    require_cmd cut
-    require_cmd head
-    require_cmd mktemp
-
-    local asset_name=""
-    local release_url=""
-    local temp_deb=""
-
-    asset_name="$(detect_architecture)"
-    log "Detected Fastfetch asset: $asset_name"
-
-    release_url="$(get_release_url "$asset_name")"
-    if [ -z "$release_url" ]; then
-        printf 'Could not resolve release URL for asset: %s\n' "$asset_name" >&2
-        exit 1
-    fi
-
-    log "Resolved release URL: $release_url"
-
-    temp_deb="$(mktemp "${TMPDIR:-/tmp}/fastfetch_latest.XXXXXX.deb")"
-    trap 'rm -f "$temp_deb"' EXIT
-
-    log "Downloading package to $temp_deb"
-    curl -fL "$release_url" -o "$temp_deb"
-
-    if [ ! -s "$temp_deb" ]; then
-        printf 'Downloaded file is empty: %s\n' "$temp_deb" >&2
-        exit 1
-    fi
-
-    log "Installing package via apt-get"
-    if command -v sudo >/dev/null 2>&1 && [ "${EUID}" -ne 0 ]; then
-        sudo apt-get install -y "$temp_deb"
-    else
-        apt-get install -y "$temp_deb"
-    fi
-
-    rm -f "$temp_deb"
-    trap - EXIT
-    log "Fastfetch install/update complete"
-}
-
-main "$@"
-EOF
-    then
-        log "Failed to write $SCRIPT_PATH." "ERROR"
+    if [ ! -f "$SCRIPT_PATH" ]; then
+        log "updatefastfetch.sh not found in the repository." "ERROR"
         return 1
     fi
-
     sudo -u "$SUDO_USER" chmod 0750 "$SCRIPT_PATH"
 
-    log "Consolidated updatefastfetch.sh written to $SCRIPT_PATH"
+    log "update-fastfetch ready at $SCRIPT_PATH"
+
+    echo
+    read -rp "Run the fastfetch updater now? [y/N]: " response < /dev/tty
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        if ! bash "$SCRIPT_PATH" < /dev/tty; then
+            log "Fastfetch updater run failed." "ERROR"
+            return 1
+        fi
+        log "Fastfetch updater completed."
+    fi
 }
 
 ###############################################################################
