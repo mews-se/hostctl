@@ -1,6 +1,7 @@
 # Automated System Configuration Script
 
 ![Version](https://img.shields.io/badge/version-v2026.08.01-informational)
+[![ShellCheck](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml)
 ![License](https://img.shields.io/badge/license-Unlicense-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Debian%2FDietPi-lightgrey)
 ![Shell](https://img.shields.io/badge/shell-bash-blue)
