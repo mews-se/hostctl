@@ -26,7 +26,8 @@ and returning failed actions safely to the menu.
 - Ed25519 SSH key generation
 - SSH key distribution to other hosts via `ssh-copy-id`
 - Atomic `.bashrc` recreation and interactive `.bash_aliases` merge
-- UFW firewall baseline (SSH allowed; PiVPN port auto-allowed when configured)
+- UFW firewall baseline (SSH allowed; PiVPN and SNMP ports auto-allowed when configured)
+- WiFi power save disable for wireless hosts (persistent via systemd)
 
 ### Services and applications
 - Profile-based SNMPD installation, configuration, and removal

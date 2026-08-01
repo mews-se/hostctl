@@ -33,7 +33,8 @@
 #     - Important paths display
 #     - Profile configuration display
 #     - Wake-on-LAN tools
-#     - Optional UFW configuration (SSH + PiVPN port allowed)
+#     - Optional UFW configuration (SSH + PiVPN/SNMP ports allowed)
+#     - WiFi power save disable (persistent via systemd)
 #     - Reboot-required detection
 #     - Self-update from GitHub
 #     - Logging to ~/hostctl.log (with rotation)
@@ -2527,6 +2528,20 @@ run_health_check() {
         echo "[INFO]  CPU temperature not available on this platform"
     fi
 
+    # WiFi power save makes a host miss broadcast ARP requests and become
+    # unreachable from the LAN, so surface it per wireless interface.
+    local wifi_dir wifi_iface ps_state
+    for wifi_dir in /sys/class/net/*/wireless; do
+        [ -d "$wifi_dir" ] || continue
+        wifi_iface="$(basename "$(dirname "$wifi_dir")")"
+        ps_state="$(iw dev "$wifi_iface" get power_save 2>/dev/null | awk -F': ' '{print $2}')"
+        if [ "$ps_state" = "on" ]; then
+            echo "[WARN]  WiFi power save is on for ${wifi_iface} (host can become unreachable from LAN)"
+        elif [ "$ps_state" = "off" ]; then
+            echo "[OK]    WiFi power save is off for ${wifi_iface}"
+        fi
+    done
+
     # Pending package updates, based on the current package lists. The count
     # is only as fresh as the last apt-get update (run at script startup).
     local pending_updates
@@ -2652,7 +2667,8 @@ show_current_profile_config() {
 # FUNCTION: configure_ufw
 # Description: Optionally install and configure a conservative UFW baseline:
 #              deny inbound traffic, allow outbound traffic, and keep SSH open.
-#              When PiVPN is configured, its VPN port is allowed as well.
+#              When PiVPN or SNMPD is configured on the host, their ports are
+#              allowed as well.
 ###############################################################################
 configure_ufw() {
     log "Configuring UFW firewall."
@@ -2706,12 +2722,33 @@ configure_ufw() {
         log "PiVPN is installed but its port could not be determined; add the UFW rule manually." "WARN"
     fi
 
-    echo
-    if [ -n "$pivpn_rule" ]; then
-        echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH, allow PiVPN ($pivpn_rule)."
-    else
-        echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH."
+    # Allow SNMP when snmpd is installed on this host, so monitoring polls
+    # are not cut off by the baseline. The port is read from the agentaddress
+    # line in snmpd.conf when possible (the hostctl default is udp:161).
+    local snmp_rule=""
+    if dpkg-query -W -f='${db:Status-Abbrev}' snmpd 2>/dev/null | grep -q '^i'; then
+        local snmp_port
+        snmp_port="$(awk '$1 == "agentaddress" {print $2}' /etc/snmp/snmpd.conf 2>/dev/null | \
+            grep -oE '[0-9]+$' | head -n1)"
+        snmp_port="${snmp_port:-161}"
+        if sudo ufw allow "${snmp_port}/udp"; then
+            snmp_rule="${snmp_port}/udp"
+            log "UFW allow rule added for SNMP: $snmp_rule"
+        else
+            log "Failed to add UFW rule for SNMP port ${snmp_port}/udp." "WARN"
+        fi
     fi
+
+    local extras=""
+    if [ -n "$pivpn_rule" ]; then
+        extras+=", allow PiVPN ($pivpn_rule)"
+    fi
+    if [ -n "$snmp_rule" ]; then
+        extras+=", allow SNMP ($snmp_rule)"
+    fi
+
+    echo
+    echo "UFW baseline is ready: deny incoming, allow outgoing, allow SSH${extras}."
     read -rp "Enable UFW now? [y/N]: " enable_ufw < /dev/tty
     if [[ "$enable_ufw" =~ ^[Yy]$ ]]; then
         if sudo ufw --force enable; then
@@ -2725,6 +2762,87 @@ configure_ufw() {
     fi
 
     sudo ufw status verbose || log "Could not read UFW status." "WARN"
+}
+
+###############################################################################
+# FUNCTION: disable_wifi_powersave
+# Description: Disable WiFi power management on all wireless interfaces, now
+#              and persistently via a systemd oneshot service. Power save on
+#              Raspberry Pi WiFi makes the host miss broadcast ARP requests,
+#              leaving it unreachable from the LAN while its own outbound
+#              traffic keeps working.
+###############################################################################
+disable_wifi_powersave() {
+    log "Disabling WiFi power save."
+
+    local -a wifi_ifaces=()
+    local wifi_dir iface
+    for wifi_dir in /sys/class/net/*/wireless; do
+        [ -d "$wifi_dir" ] && wifi_ifaces+=("$(basename "$(dirname "$wifi_dir")")")
+    done
+
+    if [ "${#wifi_ifaces[@]}" -eq 0 ]; then
+        log "No wireless interfaces found on this host. Nothing to do."
+        return 0
+    fi
+
+    if ! command -v iw >/dev/null 2>&1; then
+        wait_for_apt
+        if ! sudo apt-get install -y iw; then
+            log "Failed to install iw." "ERROR"
+            return 1
+        fi
+    fi
+
+    for iface in "${wifi_ifaces[@]}"; do
+        if sudo iw dev "$iface" set power_save off 2>/dev/null; then
+            log "Power save disabled on $iface (current session)."
+        else
+            log "Could not disable power save on $iface (interface down?)." "WARN"
+        fi
+    done
+
+    # Persist across reboots with a oneshot service covering every wireless
+    # interface present at boot.
+    local unit_file="/etc/systemd/system/wifi-powersave-off.service"
+    local unit_tmp
+    unit_tmp="$(sudo mktemp /etc/systemd/system/.hostctl-wifi-powersave.XXXXXX)"
+    if ! cat <<'EOF' | sudo tee "$unit_tmp" >/dev/null
+[Unit]
+Description=Disable WiFi power save on all wireless interfaces
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for d in /sys/class/net/*/wireless; do [ -d "$d" ] || continue; i="${d%/wireless}"; iw dev "${i##*/}" set power_save off || true; done'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    then
+        sudo rm -f "$unit_tmp"
+        log "Failed to write the systemd unit." "ERROR"
+        return 1
+    fi
+
+    if ! sudo install -o root -g root -m 0644 "$unit_tmp" "$unit_file"; then
+        sudo rm -f "$unit_tmp"
+        log "Failed to install $unit_file." "ERROR"
+        return 1
+    fi
+    sudo rm -f "$unit_tmp"
+
+    if ! sudo systemctl daemon-reload; then
+        log "systemctl daemon-reload failed." "ERROR"
+        return 1
+    fi
+    if ! sudo systemctl enable wifi-powersave-off.service >/dev/null 2>&1; then
+        log "Failed to enable wifi-powersave-off.service." "ERROR"
+        return 1
+    fi
+    sudo systemctl start wifi-powersave-off.service 2>/dev/null || true
+
+    log "WiFi power save disabled persistently via wifi-powersave-off.service."
 }
 
 ###############################################################################
@@ -2758,26 +2876,27 @@ menu() {
         echo "  10) Create/Update .bashrc"
         echo "  11) Create/Update .bash_aliases"
         echo "  12) Configure UFW firewall"
+        echo "  13) Disable WiFi power save"
         echo ""
         echo "Services and applications:"
-        echo "  13) Install and configure SNMPD"
-        echo "  14) Remove SNMPD"
-        echo "  15) Install Docker official repo"
-        echo "  16) Install Docker and relevant tools"
-        echo "  17) Docker maintenance (prune / Compose update)"
-        echo "  18) Remove Docker and relevant tools"
-        echo "  19) Install PiVPN"
-        echo "  20) Remove PiVPN"
-        echo "  21) Install Wake-on-LAN tools"
-        echo "  22) Clone/update the update-fastfetch repo"
-        echo "  23) Clone/update geodebtest (Debian mirror benchmark)"
+        echo "  14) Install and configure SNMPD"
+        echo "  15) Remove SNMPD"
+        echo "  16) Install Docker official repo"
+        echo "  17) Install Docker and relevant tools"
+        echo "  18) Docker maintenance (prune / Compose update)"
+        echo "  19) Remove Docker and relevant tools"
+        echo "  20) Install PiVPN"
+        echo "  21) Remove PiVPN"
+        echo "  22) Install Wake-on-LAN tools"
+        echo "  23) Clone/update the update-fastfetch repo"
+        echo "  24) Clone/update geodebtest (Debian mirror benchmark)"
         echo ""
         echo "Status and recovery:"
-        echo "  24) Run health check"
-        echo "  25) Show important paths"
-        echo "  26) Show current profile config"
-        echo "  27) Show available backups"
-        echo "  28) Restore from backup"
+        echo "  25) Run health check"
+        echo "  26) Show important paths"
+        echo "  27) Show current profile config"
+        echo "  28) Show available backups"
+        echo "  29) Restore from backup"
         echo ""
         echo "   0) Exit"
 
@@ -2796,22 +2915,23 @@ menu() {
             10) run_menu_action "Create/Update .bashrc" create_bashrc ;;
             11) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
             12) run_menu_action "Configure UFW firewall" configure_ufw ;;
-            13) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
-            14) run_menu_action "Remove SNMPD" remove_snmpd ;;
-            15) run_menu_action "Install Docker official repo" install_docker_repository ;;
-            16) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
-            17) run_menu_action "Docker maintenance" docker_maintenance ;;
-            18) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
-            19) run_menu_action "Install PiVPN" install_pivpn ;;
-            20) run_menu_action "Remove PiVPN" remove_pivpn ;;
-            21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
-            22) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
-            23) run_menu_action "Clone/update geodebtest" clone_geodebtest_repository ;;
-            24) run_menu_action "Run health check" run_health_check ;;
-            25) run_menu_action "Show important paths" show_important_paths ;;
-            26) run_menu_action "Show current profile config" show_current_profile_config ;;
-            27) run_menu_action "Show available backups" show_available_backups ;;
-            28) run_menu_action "Restore from backup" restore_from_backup ;;
+            13) run_menu_action "Disable WiFi power save" disable_wifi_powersave ;;
+            14) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
+            15) run_menu_action "Remove SNMPD" remove_snmpd ;;
+            16) run_menu_action "Install Docker official repo" install_docker_repository ;;
+            17) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
+            18) run_menu_action "Docker maintenance" docker_maintenance ;;
+            19) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
+            20) run_menu_action "Install PiVPN" install_pivpn ;;
+            21) run_menu_action "Remove PiVPN" remove_pivpn ;;
+            22) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
+            23) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
+            24) run_menu_action "Clone/update geodebtest" clone_geodebtest_repository ;;
+            25) run_menu_action "Run health check" run_health_check ;;
+            26) run_menu_action "Show important paths" show_important_paths ;;
+            27) run_menu_action "Show current profile config" show_current_profile_config ;;
+            28) run_menu_action "Show available backups" show_available_backups ;;
+            29) run_menu_action "Restore from backup" restore_from_backup ;;
             0)
                 log "Script execution completed."
                 log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
