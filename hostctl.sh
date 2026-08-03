@@ -2706,6 +2706,7 @@ configure_ufw() {
     # The port only admits handshakes; forwarded client traffic falls under
     # ufw's separate routed policy, so the VPN interface needs a route rule.
     local pivpn_setupvars pivpn_port pivpn_proto pivpn_dev pivpn_rule=""
+    local pivpn_net pivpn_mask pivpn_lan_dev
     for pivpn_setupvars in /etc/pivpn/wireguard/setupVars.conf /etc/pivpn/openvpn/setupVars.conf; do
         [ -f "$pivpn_setupvars" ] || continue
         pivpn_port="$(grep -m1 '^pivpnPORT=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc '0-9')"
@@ -2728,6 +2729,16 @@ configure_ufw() {
             log "UFW route rule added: forwarded traffic from $pivpn_dev allowed."
         else
             log "Failed to add UFW route rule for $pivpn_dev; VPN clients may lack internet." "WARN"
+        fi
+        # pivpn adds its own subnet-scoped route rule when it sees ufw; the
+        # generic rule above covers it, so drop the duplicate if present.
+        pivpn_net="$(grep -m1 '^pivpnNET=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc '0-9.')"
+        pivpn_mask="$(grep -m1 '^subnetClass=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc '0-9')"
+        pivpn_lan_dev="$(grep -m1 '^IPv4dev=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc 'a-z0-9')"
+        if [ -n "$pivpn_net" ] && [ -n "$pivpn_mask" ] && [ -n "$pivpn_lan_dev" ]; then
+            if sudo ufw route delete allow in on "$pivpn_dev" from "${pivpn_net}/${pivpn_mask}" out on "$pivpn_lan_dev" to any 2>/dev/null | grep -q "Rule deleted"; then
+                log "Removed PiVPN's subnet-scoped duplicate forward rule."
+            fi
         fi
     done
     if [ -z "$pivpn_rule" ] && command -v pivpn >/dev/null 2>&1; then
