@@ -2825,19 +2825,40 @@ disable_wifi_powersave() {
         fi
     done
 
-    # Persist across reboots with a oneshot service covering every wireless
-    # interface present at boot.
+    # A udev rule is the primary persistence: it fires whenever a wireless
+    # interface appears, so it survives boot ordering and driver reloads.
+    local udev_rule="/etc/udev/rules.d/70-wifi-powersave-off.rules"
+    local udev_tmp
+    udev_tmp="$(sudo mktemp /etc/udev/rules.d/.hostctl-powersave.XXXXXX)"
+    if ! printf '%s\n' 'ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", RUN+="/usr/sbin/iw dev %k set power_save off"' | sudo tee "$udev_tmp" >/dev/null; then
+        sudo rm -f "$udev_tmp"
+        log "Failed to write the udev rule." "ERROR"
+        return 1
+    fi
+    if ! sudo install -o root -g root -m 0644 "$udev_tmp" "$udev_rule"; then
+        sudo rm -f "$udev_tmp"
+        log "Failed to install $udev_rule." "ERROR"
+        return 1
+    fi
+    sudo rm -f "$udev_tmp"
+    sudo udevadm control --reload-rules 2>/dev/null || true
+
+    # Backup unit for anything udev misses. network.target was too early:
+    # wlan0 is not up yet at that point and the iw call failed silently, so
+    # power save came back on every reboot. Order after network-online and
+    # retry until the interface accepts the setting.
     local unit_file="/etc/systemd/system/wifi-powersave-off.service"
     local unit_tmp
     unit_tmp="$(sudo mktemp /etc/systemd/system/.hostctl-wifi-powersave.XXXXXX)"
     if ! cat <<'EOF' | sudo tee "$unit_tmp" >/dev/null
 [Unit]
 Description=Disable WiFi power save on all wireless interfaces
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'for d in /sys/class/net/*/wireless; do [ -d "$d" ] || continue; i="${d%/wireless}"; iw dev "${i##*/}" set power_save off || true; done'
+ExecStart=/bin/sh -c 'for n in 1 2 3 4 5 6 7 8 9 10; do ok=0; for d in /sys/class/net/*/wireless; do [ -d "$d" ] || continue; i="${d%/wireless}"; iw dev "${i##*/}" set power_save off && ok=1; done; [ "$ok" = 1 ] && exit 0; sleep 3; done; exit 0'
 
 [Install]
 WantedBy=multi-user.target
@@ -2865,7 +2886,7 @@ EOF
     fi
     sudo systemctl start wifi-powersave-off.service 2>/dev/null || true
 
-    log "WiFi power save disabled persistently via wifi-powersave-off.service."
+    log "WiFi power save disabled persistently (udev rule + wifi-powersave-off.service)."
 }
 
 ###############################################################################
