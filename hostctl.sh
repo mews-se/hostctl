@@ -2,10 +2,43 @@
 ###############################################################################
 # Author: mews_se
 # Script: hostctl.sh
+# Description:
+#   Unified system bootstrap and maintenance tool for Debian/DietPi hosts.
 #
-# Interactive setup and maintenance tool for Debian/DietPi hosts. Menu driven,
-# profile aware (x64, x64-brk, pi, pi-brk), logs to ~/hostctl.log.
-# See README.md for the full feature list.
+#   Profiles:
+#     - x64
+#     - x64-brk
+#     - pi
+#     - pi-brk
+#
+#   Features:
+#     - Required package bootstrap
+#     - System update & upgrade
+#     - APT lock detection/wait
+#     - SSH hardening with automatic rollback
+#     - Passwordless sudo
+#     - SSH key generation
+#     - SSH key distribution (ssh-copy-id)
+#     - .bashrc recreation
+#     - Interactive .bash_aliases merge/update
+#     - SNMPD install (profile-aware) & removal
+#     - Docker install & removal
+#     - Docker maintenance (prune / Compose stack updates)
+#     - PiVPN install + client configs + QR codes & removal
+#     - DietPi upgrade helpers
+#     - Fastfetch repo clone/update
+#     - geodebtest repo clone/update (Debian mirror benchmark + APT mirror apply)
+#     - Backup & restore helpers
+#     - Health check
+#     - Important paths display
+#     - Profile configuration display
+#     - Wake-on-LAN tools
+#     - Optional UFW configuration (SSH + PiVPN/SNMP ports allowed)
+#     - WiFi power save disable (persistent via systemd)
+#     - Reboot-required detection
+#     - Self-update from GitHub
+#     - Logging to ~/hostctl.log (with rotation)
+#     - Interactive menu
 ###############################################################################
 
 set -euo pipefail
@@ -42,7 +75,7 @@ fi
 ###############################################################################
 # Script metadata
 ###############################################################################
-SCRIPT_VERSION="v2026.08.01"
+SCRIPT_VERSION="v2026.08.03"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 ###############################################################################
@@ -2670,12 +2703,19 @@ configure_ufw() {
     # Allow the PiVPN VPN port when PiVPN is configured on this host. The
     # port and protocol are read from PiVPN's own setupVars.conf instead of
     # being hardcoded (WireGuard default is 51820/udp, OpenVPN 1194/udp).
-    local pivpn_setupvars pivpn_port pivpn_proto pivpn_rule=""
+    # The port only admits handshakes; forwarded client traffic falls under
+    # ufw's separate routed policy, so the VPN interface needs a route rule.
+    local pivpn_setupvars pivpn_port pivpn_proto pivpn_dev pivpn_rule=""
     for pivpn_setupvars in /etc/pivpn/wireguard/setupVars.conf /etc/pivpn/openvpn/setupVars.conf; do
         [ -f "$pivpn_setupvars" ] || continue
         pivpn_port="$(grep -m1 '^pivpnPORT=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc '0-9')"
         pivpn_proto="$(grep -m1 '^pivpnPROTO=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc 'a-z')"
         pivpn_proto="${pivpn_proto:-udp}"
+        pivpn_dev="$(grep -m1 '^pivpnDEV=' "$pivpn_setupvars" | cut -d= -f2- | tr -dc 'a-z0-9')"
+        case "$pivpn_setupvars" in
+            */wireguard/*) pivpn_dev="${pivpn_dev:-wg0}" ;;
+            */openvpn/*) pivpn_dev="${pivpn_dev:-tun0}" ;;
+        esac
         if [ -n "$pivpn_port" ]; then
             if sudo ufw allow "${pivpn_port}/${pivpn_proto}"; then
                 pivpn_rule="${pivpn_port}/${pivpn_proto}"
@@ -2683,6 +2723,11 @@ configure_ufw() {
             else
                 log "Failed to add UFW rule for PiVPN port ${pivpn_port}/${pivpn_proto}." "WARN"
             fi
+        fi
+        if sudo ufw route allow in on "$pivpn_dev"; then
+            log "UFW route rule added: forwarded traffic from $pivpn_dev allowed."
+        else
+            log "Failed to add UFW route rule for $pivpn_dev; VPN clients may lack internet." "WARN"
         fi
     done
     if [ -z "$pivpn_rule" ] && command -v pivpn >/dev/null 2>&1; then
@@ -2708,7 +2753,7 @@ configure_ufw() {
 
     local extras=""
     if [ -n "$pivpn_rule" ]; then
-        extras+=", allow PiVPN ($pivpn_rule)"
+        extras+=", allow PiVPN ($pivpn_rule + forwarding via $pivpn_dev)"
     fi
     if [ -n "$snmp_rule" ]; then
         extras+=", allow SNMP ($snmp_rule)"
