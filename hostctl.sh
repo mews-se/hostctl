@@ -762,6 +762,26 @@ self_update() {
         return 1
     fi
 
+    # In a git clone, replacing the file directly leaves the work tree dirty
+    # and blocks every later git pull; update through git instead.
+    local script_dir
+    script_dir="$(dirname "$script_path")"
+    if [ -d "$script_dir/.git" ]; then
+        log "Script lives in a git clone; updating via git pull."
+        sudo -u "$SUDO_USER" git -C "$script_dir" checkout -- . 2>/dev/null || true
+        if ! sudo -u "$SUDO_USER" git -C "$script_dir" pull --ff-only; then
+            log "git pull failed in $script_dir." "ERROR"
+            return 1
+        fi
+        new_version="$(grep -m1 '^SCRIPT_VERSION=' "$script_path" | cut -d'"' -f2)"
+        if [ "$new_version" = "$SCRIPT_VERSION" ]; then
+            log "hostctl is already up to date ($SCRIPT_VERSION)."
+        else
+            log "hostctl updated to ${new_version:-unknown}. Exit and restart the script to use the new version."
+        fi
+        return 0
+    fi
+
     log "Checking for a newer hostctl.sh at GitHub (main branch)."
 
     # raw.githubusercontent.com is served through a CDN that caches responses
