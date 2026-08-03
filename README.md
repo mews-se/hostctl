@@ -1,4 +1,4 @@
-# Automated System Configuration Script
+# hostctl
 
 ![Version](https://img.shields.io/badge/version-v2026.08.01-informational)
 [![ShellCheck](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml)
@@ -6,11 +6,11 @@
 ![Platform](https://img.shields.io/badge/platform-Debian%2FDietPi-lightgrey)
 ![Shell](https://img.shields.io/badge/shell-bash-blue)
 
-`hostctl.sh` is an interactive Bash utility for post-install configuration and
-maintenance of Debian, DietPi, Raspberry Pi, and home-lab systems.
-
-It provides repeatable setup tasks while validating security-sensitive changes
-and returning failed actions safely to the menu.
+One command to update, inspect and manage your Debian hosts. hostctl is an
+interactive Bash menu for post-install setup and day-to-day maintenance of
+Debian, DietPi and Raspberry Pi systems. Risky changes are validated before
+they go live, and a failed action drops you back to the menu instead of
+killing the script.
 
 ## Features
 
@@ -44,8 +44,8 @@ and returning failed actions safely to the menu.
 - Configuration backup and restore helpers with automatic pruning
 - Profile information and important-path reporting
 
-The interactive menu is grouped into these four sections, with recoverable
-action failures and logging to the invoking user's `~/hostctl.log`.
+The menu is grouped into these four sections. Everything is logged to
+`~/hostctl.log`.
 
 ## Profiles
 
@@ -173,18 +173,6 @@ previous generation.
 - Review the reboot-required result after system upgrades.
 - Test SSH access in a second session before closing the current connection.
 - Restart the script after a self-update to run the new version.
-
-## Validation
-
-The main script is checked with:
-
-```bash
-bash -n hostctl.sh
-shellcheck hostctl.sh
-```
-
-System-changing operations should still be tested on the intended Debian or
-DietPi host before broad deployment.
 
 ## License
 

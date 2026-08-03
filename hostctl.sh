@@ -2,43 +2,10 @@
 ###############################################################################
 # Author: mews_se
 # Script: hostctl.sh
-# Description:
-#   Unified system bootstrap and maintenance tool for Debian/DietPi hosts.
 #
-#   Profiles:
-#     - x64
-#     - x64-brk
-#     - pi
-#     - pi-brk
-#
-#   Features:
-#     - Required package bootstrap
-#     - System update & upgrade
-#     - APT lock detection/wait
-#     - SSH hardening with automatic rollback
-#     - Passwordless sudo
-#     - SSH key generation
-#     - SSH key distribution (ssh-copy-id)
-#     - .bashrc recreation
-#     - Interactive .bash_aliases merge/update
-#     - SNMPD install (profile-aware) & removal
-#     - Docker install & removal
-#     - Docker maintenance (prune / Compose stack updates)
-#     - PiVPN install + client configs + QR codes & removal
-#     - DietPi upgrade helpers
-#     - Fastfetch repo clone/update
-#     - geodebtest repo clone/update (Debian mirror benchmark + APT mirror apply)
-#     - Backup & restore helpers
-#     - Health check
-#     - Important paths display
-#     - Profile configuration display
-#     - Wake-on-LAN tools
-#     - Optional UFW configuration (SSH + PiVPN/SNMP ports allowed)
-#     - WiFi power save disable (persistent via systemd)
-#     - Reboot-required detection
-#     - Self-update from GitHub
-#     - Logging to ~/hostctl.log (with rotation)
-#     - Interactive menu
+# Interactive setup and maintenance tool for Debian/DietPi hosts. Menu driven,
+# profile aware (x64, x64-brk, pi, pi-brk), logs to ~/hostctl.log.
+# See README.md for the full feature list.
 ###############################################################################
 
 set -euo pipefail
