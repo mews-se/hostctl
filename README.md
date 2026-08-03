@@ -1,6 +1,6 @@
 # hostctl
 
-![Version](https://img.shields.io/badge/version-v2026.08.01-informational)
+![Version](https://img.shields.io/badge/version-v2026.08.03-informational)
 [![ShellCheck](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 ![Platform](https://img.shields.io/badge/platform-Debian%2FDietPi-lightgrey)
