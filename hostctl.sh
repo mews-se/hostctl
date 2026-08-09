@@ -1,63 +1,19 @@
 #!/bin/bash
-###############################################################################
-# Author: mews_se
-# Script: hostctl.sh
-# Description:
-#   Unified system bootstrap and maintenance tool for Debian/DietPi hosts.
-#
-#   Profiles:
-#     - x64
-#     - x64-brk
-#     - pi
-#     - pi-brk
-#
-#   Features:
-#     - Required package bootstrap
-#     - System update & upgrade
-#     - APT lock detection/wait
-#     - SSH hardening with automatic rollback
-#     - Passwordless sudo
-#     - SSH key generation
-#     - SSH key distribution (ssh-copy-id)
-#     - .bashrc recreation
-#     - Interactive .bash_aliases merge/update
-#     - SNMPD install (profile-aware) & removal
-#     - Docker install & removal
-#     - Docker maintenance (prune / Compose stack updates)
-#     - PiVPN install + client configs + QR codes & removal
-#     - DietPi upgrade helpers
-#     - Fastfetch repo clone/update
-#     - geodebtest repo clone/update (Debian mirror benchmark + APT mirror apply)
-#     - Backup & restore helpers
-#     - Health check
-#     - Important paths display
-#     - Profile configuration display
-#     - Wake-on-LAN tools
-#     - Optional UFW configuration (SSH + PiVPN/SNMP ports allowed)
-#     - WiFi power save disable (persistent via systemd)
-#     - Reboot-required detection
-#     - Self-update from GitHub
-#     - Logging to ~/hostctl.log (with rotation)
-#     - Interactive menu
-###############################################################################
+# hostctl - interactive setup and maintenance menu for Debian and DietPi
+# hosts, by mews_se. Profiles: x64, x64-brk, pi, pi-brk. See README.md
+# for the feature list.
 
 set -euo pipefail
 
-###############################################################################
-# Trap signals for graceful exit
-###############################################################################
 trap 'echo "Script interrupted. Exiting..."; exit 1' SIGINT SIGTERM
 
-###############################################################################
-# Validate environment: SUDO_USER must be set
-###############################################################################
 if [ "${EUID}" -ne 0 ]; then
-    echo "Error: This script must be run as root. Please use sudo." >&2
+    echo "Error: this script must be run as root, use sudo." >&2
     exit 1
 fi
 
 if [ -z "${SUDO_USER:-}" ]; then
-    echo "Error: SUDO_USER is not set. Please run this script with sudo." >&2
+    echo "Error: SUDO_USER is not set, run the script through sudo." >&2
     exit 1
 fi
 
@@ -72,16 +28,9 @@ if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     exit 1
 fi
 
-###############################################################################
-# Script metadata
-###############################################################################
-SCRIPT_VERSION="v2026.08.03"
+SCRIPT_VERSION="v2026.08.09"
 LOG_FILE="$USER_HOME/hostctl.log"
 
-###############################################################################
-# FUNCTION: log
-# Description: Timestamped log helper with optional logfile in user home
-###############################################################################
 log() {
     local message="$1"
     local level="${2:-INFO}"
@@ -108,11 +57,6 @@ log() {
     printf '%s\n' "$line" | sudo -u "$SUDO_USER" tee -a "$LOG_FILE" >/dev/null 2>&1 || true
 }
 
-###############################################################################
-# FUNCTION: rotate_log_file
-# Description: Keep hostctl.log from growing forever. When it exceeds 1 MB the
-#              current log is moved aside to hostctl.log.old (one generation).
-###############################################################################
 rotate_log_file() {
     local max_size=1048576
     local size
@@ -127,11 +71,7 @@ rotate_log_file() {
     fi
 }
 
-###############################################################################
-# FUNCTION: run_menu_action
-# Description: Run an interactive menu action without letting set -e terminate
-#              the whole script on recoverable/action-level failures.
-###############################################################################
+# keep set -e from killing the whole script when a menu action fails
 run_menu_action() {
     local label="$1"
     local rc
@@ -157,12 +97,7 @@ run_menu_action() {
     return 0
 }
 
-###############################################################################
-# FUNCTION: wait_for_apt
-# Description: Wait for background apt/dpkg processes to release locks before
-#              running apt-get. This avoids failures when apt-daily or another
-#              package operation is already active.
-###############################################################################
+# apt-daily or another package operation may be holding the locks
 wait_for_apt() {
     # fuser is supplied by psmisc. If it is missing, skip the lock wait rather
     # than failing before bootstrap packages can be installed.
@@ -188,13 +123,8 @@ wait_for_apt() {
     done
 }
 
-###############################################################################
-# FUNCTION: mark_apt_lists_fresh
-# Description: Record a successful apt-get update in the standard Debian stamp
-#              file. The list files themselves keep their old mtimes when the
-#              mirrors respond 304 Not Modified, so a dedicated stamp is the
-#              only reliable freshness signal.
-###############################################################################
+# the list files keep their mtimes on 304 Not Modified, only a stamp is a
+# reliable freshness signal
 APT_UPDATE_STAMP="/var/lib/apt/periodic/update-success-stamp"
 
 mark_apt_lists_fresh() {
@@ -202,13 +132,7 @@ mark_apt_lists_fresh() {
     sudo touch "$APT_UPDATE_STAMP" 2>/dev/null || true
 }
 
-###############################################################################
-# FUNCTION: refresh_apt_package_lists
-# Description: Refresh APT package indexes once during startup, before dependency
-#              checks/installations. This intentionally does not upgrade packages.
-#              The refresh is skipped when the indexes are already fresh, so
-#              restarting the script does not rerun apt-get update every time.
-###############################################################################
+# refreshes the indexes once at startup, never upgrades, skipped while fresh
 refresh_apt_package_lists() {
     local max_age_minutes=60
 
@@ -232,11 +156,6 @@ refresh_apt_package_lists() {
     fi
 }
 
-###############################################################################
-# FUNCTION: check_reboot_required
-# Description: Report whether Debian/DietPi has flagged the system for reboot.
-#              This is informational only; the script never reboots by itself.
-###############################################################################
 check_reboot_required() {
     # Debian-family systems create this marker after updates that need a reboot.
     if [ -f /var/run/reboot-required ]; then
@@ -251,10 +170,6 @@ check_reboot_required() {
     log "Reboot required: no"
 }
 
-###############################################################################
-# FUNCTION: backup_file
-# Description: Create a timestamped backup of a file if it exists
-###############################################################################
 backup_file() {
     local target_file="$1"
     local backup_file
@@ -271,11 +186,6 @@ backup_file() {
     printf '%s\n' "$backup_file"
 }
 
-###############################################################################
-# FUNCTION: prune_old_backups
-# Description: Keep only the newest timestamped backups for a target file so
-#              .bak_* copies do not accumulate forever.
-###############################################################################
 prune_old_backups() {
     local target_file="$1"
     local keep=5
@@ -289,13 +199,7 @@ prune_old_backups() {
         done
 }
 
-###############################################################################
-# FUNCTION: find_latest_backup
-# Description: Return latest timestamped backup for a target file. Backups are
-#              searched next to the file by default; an explicit directory can
-#              be given for tools that keep their backups elsewhere (geodebtest
-#              stores its APT source backups under ~/geodebtest/backups).
-###############################################################################
+# backups sit next to their file unless the tool keeps them elsewhere
 find_latest_backup() {
     local target_file="$1"
     local search_dir="${2:-$(dirname "$target_file")}"
@@ -305,10 +209,6 @@ find_latest_backup() {
         sort -nr | head -n1 | cut -d' ' -f2-
 }
 
-###############################################################################
-# FUNCTION: get_os_codename
-# Description: Read VERSION_CODENAME from /etc/os-release
-###############################################################################
 get_os_codename() {
     local distro_codename
 
@@ -327,10 +227,6 @@ get_os_codename() {
     echo "$distro_codename"
 }
 
-###############################################################################
-# FUNCTION: ssh_service_name
-# Description: Detect the active SSH service name
-###############################################################################
 ssh_service_name() {
     if sudo systemctl list-unit-files ssh.service >/dev/null 2>&1; then
         echo "ssh"
@@ -341,10 +237,6 @@ ssh_service_name() {
     fi
 }
 
-###############################################################################
-# FUNCTION: restart_ssh_service
-# Description: Restart SSH service if present
-###############################################################################
 restart_ssh_service() {
     local service_name
     service_name="$(ssh_service_name)"
@@ -362,10 +254,6 @@ restart_ssh_service() {
     fi
 }
 
-###############################################################################
-# FUNCTION: get_allowed_ssh_users
-# Description: Build AllowUsers entry from available local accounts
-###############################################################################
 get_allowed_ssh_users() {
     local users=()
     local candidate
@@ -379,10 +267,6 @@ get_allowed_ssh_users() {
     awk 'NF { if (!seen[$0]++) printf "%s ", $0 }' < <(printf '%s\n' "${users[@]}") | sed 's/[[:space:]]*$//'
 }
 
-###############################################################################
-# FUNCTION: detect_default_profile
-# Description: Detect a sensible default profile from CPU architecture
-###############################################################################
 detect_default_profile() {
     local arch
     arch="$(uname -m || true)"
@@ -392,10 +276,6 @@ detect_default_profile() {
     esac
 }
 
-###############################################################################
-# FUNCTION: select_profile
-# Description: Original interactive profile selection UI
-###############################################################################
 PROFILE=""
 
 select_profile() {
@@ -429,17 +309,10 @@ select_profile() {
     log "Profile selected: $PROFILE"
 }
 
-###############################################################################
-# PROFILE VARIABLES
-# Description: Variables that differ between profile types
-###############################################################################
+# profile variables
 SNMP_ROCOMMUNITY=""
 SNMP_HARDWARE_EXTENDS=""
 
-###############################################################################
-# FUNCTION: apply_profile_config
-# Description: Apply per-profile SNMP settings
-###############################################################################
 apply_profile_config() {
     case "$PROFILE" in
         x64)
@@ -501,10 +374,7 @@ EOL
     esac
 }
 
-###############################################################################
-# REQUIRED COMMANDS / PACKAGE MAP
-# Description: Commands to verify/install before running functions
-###############################################################################
+# required commands and the packages that provide them
 declare -A required_commands=(
     [sudo]="sudo"
     [apt-get]="apt-get"
@@ -518,10 +388,6 @@ declare -A required_commands=(
     [script]="bsdutils"
 )
 
-###############################################################################
-# FUNCTION: install_missing_packages
-# Description: Ensure all required commands/packages are available
-###############################################################################
 install_missing_packages() {
     local missing_packages=()
     local failed_packages=()
@@ -540,7 +406,7 @@ install_missing_packages() {
 
         wait_for_apt
         if ! sudo apt-get update; then
-            log "Error updating package lists. Please check your sources and network." "ERROR"
+            log "Error updating package lists, check the sources and network." "ERROR"
             exit 1
         fi
 
@@ -578,10 +444,6 @@ install_missing_packages() {
     log "All required commands are now available."
 }
 
-###############################################################################
-# FUNCTION: preflight_ssh
-# Description: Check basic SSH prerequisites before editing sshd_config
-###############################################################################
 preflight_ssh() {
     if [ ! -f /etc/ssh/sshd_config ]; then
         log "/etc/ssh/sshd_config not found." "ERROR"
@@ -590,10 +452,6 @@ preflight_ssh() {
     return 0
 }
 
-###############################################################################
-# FUNCTION: preflight_docker
-# Description: Check basic prerequisites before Docker repo installation
-###############################################################################
 preflight_docker() {
     if [ ! -f /etc/os-release ]; then
         log "/etc/os-release not found." "ERROR"
@@ -613,10 +471,6 @@ preflight_docker() {
     return 0
 }
 
-###############################################################################
-# FUNCTION: preflight_pivpn
-# Description: Check basic prerequisites before PiVPN installation
-###############################################################################
 preflight_pivpn() {
     if ! command -v curl >/dev/null 2>&1; then
         log "curl is required for PiVPN installation." "ERROR"
@@ -631,10 +485,6 @@ preflight_pivpn() {
     return 0
 }
 
-###############################################################################
-# FUNCTION: system_update_upgrade
-# Description: Update package lists and perform full upgrade
-###############################################################################
 system_update_upgrade() {
     log "Running system update and upgrade."
 
@@ -655,11 +505,7 @@ system_update_upgrade() {
     check_reboot_required
 }
 
-###############################################################################
-# FUNCTION: run_remote_root_script
-# Description: Download a remote installer to a temporary file, validate Bash
-#              syntax, show its digest, and require confirmation before running.
-###############################################################################
+# a remote installer is never piped straight into bash
 run_remote_root_script() {
     local label="$1"
     local url="$2"
@@ -713,10 +559,6 @@ run_remote_root_script() {
     rm -f "$tmp"
 }
 
-###############################################################################
-# FUNCTION: dietpi_bullseye_to_bookworm
-# Description: Run DietPi Bullseye -> Bookworm upgrade in a PTY
-###############################################################################
 dietpi_bullseye_to_bookworm() {
     log "DietPi upgrade: Bullseye -> Bookworm"
     if run_remote_root_script \
@@ -729,10 +571,6 @@ dietpi_bullseye_to_bookworm() {
     fi
 }
 
-###############################################################################
-# FUNCTION: dietpi_bookworm_to_trixie
-# Description: Run DietPi Bookworm -> Trixie upgrade in a PTY
-###############################################################################
 dietpi_bookworm_to_trixie() {
     log "DietPi upgrade: Bookworm -> Trixie"
     if run_remote_root_script \
@@ -745,13 +583,7 @@ dietpi_bookworm_to_trixie() {
     fi
 }
 
-###############################################################################
-# FUNCTION: self_update
-# Description: Fetch the latest hostctl.sh from GitHub, validate it, show the
-#              version change, and replace this script after confirmation. The
-#              replacement is an atomic rename, so the running instance keeps
-#              executing from the old inode and is unaffected until restarted.
-###############################################################################
+# the replacement is an atomic rename, the running instance keeps its old inode
 self_update() {
     local update_url="https://raw.githubusercontent.com/mews-se/hostctl/main/hostctl.sh"
     local script_path tmp new_version response cache_buster
@@ -837,10 +669,6 @@ self_update() {
     log "hostctl updated to $new_version. Exit and restart the script to use the new version."
 }
 
-###############################################################################
-# FUNCTION: update_sudoers
-# Description: Enable passwordless sudo for the sudo group
-###############################################################################
 update_sudoers() {
     log "Updating sudoers."
 
@@ -891,12 +719,7 @@ update_sudoers() {
     log "sudoers drop-in updated successfully at $sudoers_dropin."
 }
 
-###############################################################################
-# FUNCTION: configure_ssh
-# Description: Disable root SSH login and restrict allowed users. The original
-#              sshd_config is backed up first; failed validation or restart
-#              triggers an automatic rollback.
-###############################################################################
+# failed validation or restart rolls the previous config back
 configure_ssh() {
     preflight_ssh || return 1
 
@@ -1020,10 +843,6 @@ configure_ssh() {
 
     log "SSH configuration updated successfully."
 }
-###############################################################################
-# FUNCTION: generate_ssh_key
-# Description: Generate ed25519 SSH key for invoking sudo user
-###############################################################################
 generate_ssh_key() {
     log "Generating SSH key."
 
@@ -1045,13 +864,6 @@ generate_ssh_key() {
     fi
 }
 
-###############################################################################
-# FUNCTION: distribute_ssh_key
-# Description: Copy the invoking user's public key to one or more remote hosts
-#              with ssh-copy-id. Targets can be picked from the ssh aliases in
-#              ~/.bash_aliases (including any -p port) or entered manually as
-#              user@host. Each transfer may prompt for the remote password.
-###############################################################################
 distribute_ssh_key() {
     log "Distributing SSH public key."
 
@@ -1190,10 +1002,6 @@ distribute_ssh_key() {
     log "SSH key distribution completed."
 }
 
-###############################################################################
-# FUNCTION: create_bashrc
-# Description: Replace ~/.bashrc with curated default
-###############################################################################
 create_bashrc() {
     log "Creating/updating .bashrc file."
 
@@ -1284,10 +1092,6 @@ EOL
     log ".bashrc file created/updated successfully for user: $SUDO_USER."
 }
 
-###############################################################################
-# FUNCTION: create_bash_aliases
-# Description: Merge curated aliases with optional retention of custom aliases
-###############################################################################
 create_bash_aliases() {
     log "Creating/updating .bash_aliases file with interactive review."
 
@@ -1414,10 +1218,6 @@ EOL
     log ".bash_aliases updated successfully with interactive selections and sorted output."
 }
 
-###############################################################################
-# FUNCTION: install_configure_snmpd
-# Description: Install SNMPD and write profile-specific configuration
-###############################################################################
 install_configure_snmpd() {
     log "Installing and configuring SNMPD."
 
@@ -1508,12 +1308,7 @@ EOF
     fi
 }
 
-###############################################################################
-# FUNCTION: remove_snmpd
-# Description: Stop, disable, and purge SNMPD. Configuration is removed by the
-#              purge, but timestamped .bak_* backups of snmpd.conf are kept so
-#              a reinstall can be restored. lm-sensors is left installed.
-###############################################################################
+# keeps the snmpd.conf backups and lm-sensors
 remove_snmpd() {
     log "Removing SNMPD."
 
@@ -1552,10 +1347,6 @@ remove_snmpd() {
     log "SNMPD removed successfully."
 }
 
-###############################################################################
-# FUNCTION: install_docker_repository
-# Description: Add Docker official repository
-###############################################################################
 install_docker_repository() {
     preflight_docker || return 1
 
@@ -1608,10 +1399,6 @@ install_docker_repository() {
     log "Docker repository installed successfully."
 }
 
-###############################################################################
-# FUNCTION: install_pivpn
-# Description: Install PiVPN via PTY and optionally create default clients
-###############################################################################
 install_pivpn() {
     preflight_pivpn || return 1
 
@@ -1633,10 +1420,6 @@ install_pivpn() {
     fi
 }
 
-###############################################################################
-# FUNCTION: create_pivpn_clients
-# Description: Create hostname-based clients and optionally show iPhone QR code
-###############################################################################
 create_pivpn_clients() {
     log "Creating PiVPN client configurations."
 
@@ -1678,12 +1461,6 @@ create_pivpn_clients() {
     fi
 }
 
-###############################################################################
-# FUNCTION: remove_pivpn
-# Description: Run PiVPN's own uninstaller (pivpn -u) in a PTY. The uninstaller
-#              is interactive, like the installer: it asks which dependencies
-#              to remove and deletes the VPN server configuration.
-###############################################################################
 remove_pivpn() {
     log "Removing PiVPN."
 
@@ -1722,10 +1499,6 @@ remove_pivpn() {
     log "PiVPN removed successfully."
 }
 
-###############################################################################
-# FUNCTION: install_docker_ce
-# Description: Install Docker Engine and related tools
-###############################################################################
 install_docker_ce() {
     log "Installing Docker CE and related tools."
 
@@ -1801,11 +1574,6 @@ install_docker_ce() {
     fi
 }
 
-###############################################################################
-# FUNCTION: docker_maintenance
-# Description: Docker housekeeping submenu: prune unused data and/or pull and
-#              restart all discovered Docker Compose stacks.
-###############################################################################
 docker_maintenance() {
     if ! command -v docker >/dev/null 2>&1; then
         log "Docker is not installed." "ERROR"
@@ -1831,11 +1599,6 @@ docker_maintenance() {
     esac
 }
 
-###############################################################################
-# FUNCTION: docker_prune
-# Description: Show current Docker disk usage and prune unused data after
-#              confirmation. Optionally also removes all unused images (-a).
-###############################################################################
 docker_prune() {
     echo
     echo "Current Docker disk usage:"
@@ -1859,11 +1622,6 @@ docker_prune() {
     log "Docker prune completed."
 }
 
-###############################################################################
-# FUNCTION: docker_compose_update
-# Description: Discover Docker Compose files under common locations and, after
-#              confirmation, pull images and restart each stack.
-###############################################################################
 docker_compose_update() {
     if ! sudo docker compose version >/dev/null 2>&1; then
         log "Docker Compose plugin is not available." "ERROR"
@@ -1919,10 +1677,6 @@ docker_compose_update() {
     log "All Compose stacks updated successfully."
 }
 
-###############################################################################
-# FUNCTION: remove_docker_and_tools
-# Description: Remove Docker packages, repo files, keys, and data directories
-###############################################################################
 remove_docker_and_tools() {
     log "Removing Docker CE and related tools."
 
@@ -2032,10 +1786,6 @@ remove_docker_and_tools() {
     log "Docker packages, group memberships, repository configuration, and data directories removed."
 }
 
-###############################################################################
-# FUNCTION: install_wakeonlan
-# Description: Install Wake-on-LAN tools
-###############################################################################
 install_wakeonlan() {
     log "Installing Wake-on-LAN tools."
 
@@ -2061,14 +1811,8 @@ install_wakeonlan() {
     log "Wake-on-LAN setup completed."
 }
 
-###############################################################################
-# FUNCTION: clone_fastfetch_repository
-# Description: Clone/update the update-fastfetch repository and optionally run
-#              the updater. The repository's own updatefastfetch.sh is the
-#              source of truth; earlier hostctl versions overwrote it with an
-#              embedded copy, so any such local changes are discarded before
-#              updating.
-###############################################################################
+# the repo's own updatefastfetch.sh is the source of truth, older hostctl
+# versions overwrote it and such local changes are discarded
 clone_fastfetch_repository() {
     log "Preparing update-fastfetch repository."
 
@@ -2116,14 +1860,6 @@ clone_fastfetch_repository() {
     fi
 }
 
-###############################################################################
-# FUNCTION: clone_geodebtest_repository
-# Description: Clone/update the geodebtest repo (Debian mirror benchmark:
-#              autodetects country, fetches the official mirror list, ranks by
-#              ping/TTFB/download speed) and optionally run it right away.
-#              Since v2026.07.31-2 the benchmark can also apply the chosen
-#              mirror to the APT sources, with its own backup and rollback.
-###############################################################################
 clone_geodebtest_repository() {
     log "Preparing geodebtest repository."
 
@@ -2173,10 +1909,6 @@ clone_geodebtest_repository() {
     fi
 }
 
-###############################################################################
-# FUNCTION: show_available_backups
-# Description: Show latest backup files for important configuration files
-###############################################################################
 show_available_backups() {
     log "Showing available backups."
 
@@ -2222,10 +1954,6 @@ show_available_backups() {
     done
 }
 
-###############################################################################
-# FUNCTION: restore_from_backup
-# Description: Restore the latest backup of a selected file
-###############################################################################
 restore_from_backup() {
     log "Restore from backup selected."
 
@@ -2387,10 +2115,6 @@ restore_from_backup() {
     log "Restore completed for $target_file"
 }
 
-###############################################################################
-# FUNCTION: run_health_check
-# Description: Verify status of important setup components
-###############################################################################
 run_health_check() {
     log "Running health check."
 
@@ -2573,10 +2297,6 @@ run_health_check() {
     fi
 }
 
-###############################################################################
-# FUNCTION: show_important_paths
-# Description: Show important file paths, directories, and expected locations
-###############################################################################
 show_important_paths() {
     log "Showing important paths."
 
@@ -2646,10 +2366,6 @@ show_important_paths() {
     done
 }
 
-###############################################################################
-# FUNCTION: show_current_profile_config
-# Description: Show currently active profile-related configuration
-###############################################################################
 show_current_profile_config() {
     log "Showing current profile configuration."
 
@@ -2683,13 +2399,6 @@ show_current_profile_config() {
     esac
 }
 
-###############################################################################
-# FUNCTION: configure_ufw
-# Description: Optionally install and configure a conservative UFW baseline:
-#              deny inbound traffic, allow outbound traffic, and keep SSH open.
-#              When PiVPN or SNMPD is configured on the host, their ports are
-#              allowed as well.
-###############################################################################
 configure_ufw() {
     log "Configuring UFW firewall."
 
@@ -2807,14 +2516,8 @@ configure_ufw() {
     sudo ufw status verbose || log "Could not read UFW status." "WARN"
 }
 
-###############################################################################
-# FUNCTION: disable_wifi_powersave
-# Description: Disable WiFi power management on all wireless interfaces, now
-#              and persistently via a systemd oneshot service. Power save on
-#              Raspberry Pi WiFi makes the host miss broadcast ARP requests,
-#              leaving it unreachable from the LAN while its own outbound
-#              traffic keeps working.
-###############################################################################
+# power save on Pi WiFi drops broadcast ARP and the host turns unreachable
+# while its own outbound traffic keeps working
 disable_wifi_powersave() {
     log "Disabling WiFi power save."
 
@@ -2909,11 +2612,6 @@ EOF
     log "WiFi power save disabled persistently (udev rule + wifi-powersave-off.service)."
 }
 
-###############################################################################
-# FUNCTION: menu
-# Description: Interactive menu exposing standard setup, optional operations,
-#              verification helpers, and exit handling.
-###############################################################################
 menu() {
     while true; do
         clear
@@ -2923,7 +2621,7 @@ menu() {
         echo "Version: $SCRIPT_VERSION"
         echo "Profile: $PROFILE"
         echo "-------------------------------------"
-        echo "Please select an option:"
+        echo "Select an option:"
         echo ""
         echo "System:"
         echo "   1) System update and upgrade"
@@ -2998,14 +2696,14 @@ menu() {
             29) run_menu_action "Restore from backup" restore_from_backup ;;
             0)
                 log "Script execution completed."
-                log "Please apply the following command manually to source both .bashrc and .bash_aliases files:"
+                log "Apply the following command manually to source both .bashrc and .bash_aliases files:"
                 echo ". $USER_HOME/.bashrc && . $USER_HOME/.bash_aliases"
                 echo "Alternatively, log out and log back in to start a new shell session."
                 echo "Log file: $LOG_FILE"
                 exit 0
                 ;;
             *)
-                echo "Invalid choice. Please select a valid option."
+                echo "Invalid choice."
                 ;;
         esac
 
@@ -3013,9 +2711,6 @@ menu() {
     done
 }
 
-###############################################################################
-# START
-###############################################################################
 rotate_log_file
 log "hostctl execution started. Version: $SCRIPT_VERSION"
 select_profile
