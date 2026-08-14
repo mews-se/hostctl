@@ -2,9 +2,9 @@
 
 ![Version](https://img.shields.io/badge/version-v2026.08.09-informational)
 [![ShellCheck](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-![Platform](https://img.shields.io/badge/platform-Debian%2FDietPi-lightgrey)
-![Shell](https://img.shields.io/badge/shell-bash-blue)
+![Shell: Bash](https://img.shields.io/badge/shell-bash-4EAA25.svg?logo=gnubash&logoColor=white)
+![Platform: Debian based](https://img.shields.io/badge/platform-Debian%20based-A81D33.svg?logo=debian&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 One command to update, inspect and manage your Debian hosts. hostctl is an
 interactive Bash menu for post-install setup and day-to-day maintenance of
