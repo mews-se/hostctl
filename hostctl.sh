@@ -28,7 +28,7 @@ if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v2026.08.09"
+SCRIPT_VERSION="v2026.08.15"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 log() {
@@ -1128,8 +1128,8 @@ alias dcupd="docker compose up -d"
 alias dcupdlog="docker compose up -d && docker compose logs -f"
 alias dellpi="ssh dietpi@10.0.0.6"
 alias fa="fastfetch"
-alias fanoff="sudo systemctl stop fancontrol.service"
-alias fanon="sudo systemctl start fancontrol.service"
+alias fanauto="sudo dellfan auto"
+alias fanmax="sudo dellfan max"
 alias ff="fastfetch -c all.jsonc"
 alias flight="ssh root@10.0.1.12"
 alias hostctl="rm -rf ~/hostctl ~/startchanges && git clone https://github.com/mews-se/hostctl.git ~/hostctl"
