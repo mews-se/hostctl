@@ -28,7 +28,7 @@ if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v2026.08.15"
+SCRIPT_VERSION="v2026.08.17"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 log() {
@@ -151,8 +151,7 @@ refresh_apt_package_lists() {
         mark_apt_lists_fresh
         log "APT package indexes refreshed successfully."
     else
-        log "Failed to refresh APT package indexes. Check network and APT sources." "ERROR"
-        exit 1
+        log "Failed to refresh APT package indexes, continuing with the existing lists." "WARN"
     fi
 }
 
@@ -384,7 +383,6 @@ declare -A required_commands=(
     [dpkg]="dpkg"
     [curl]="curl"
     [git]="git"
-    [nc]="netcat-traditional"
     [script]="bsdutils"
 )
 
@@ -1214,7 +1212,7 @@ EOL
     done | sort >> "$TEMP_FILE"
 
     sudo mv "$TEMP_FILE" "$ALIASES_FILE"
-    sudo chown "$SUDO_USER:$SUDO_USER" "$ALIASES_FILE"
+    sudo chown "$SUDO_USER:" "$ALIASES_FILE"
     log ".bash_aliases updated successfully with interactive selections and sorted output."
 }
 
@@ -2570,6 +2568,7 @@ disable_wifi_powersave() {
     # wlan0 is not up yet at that point and the iw call failed silently, so
     # power save came back on every reboot. Order after network-online and
     # retry until the interface accepts the setting.
+    # systemd expands $ and % in ExecStart before the shell runs, hence $$/%%.
     local unit_file="/etc/systemd/system/wifi-powersave-off.service"
     local unit_tmp
     unit_tmp="$(sudo mktemp /etc/systemd/system/.hostctl-wifi-powersave.XXXXXX)"
@@ -2581,7 +2580,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'for n in 1 2 3 4 5 6 7 8 9 10; do ok=0; for d in /sys/class/net/*/wireless; do [ -d "$d" ] || continue; i="${d%/wireless}"; iw dev "${i##*/}" set power_save off && ok=1; done; [ "$ok" = 1 ] && exit 0; sleep 3; done; exit 0'
+ExecStart=/bin/sh -c 'for n in 1 2 3 4 5 6 7 8 9 10; do ok=0; for d in /sys/class/net/*/wireless; do [ -d "$$d" ] || continue; i="$${d%%/wireless}"; iw dev "$${i##*/}" set power_save off && ok=1; done; [ "$$ok" = 1 ] && exit 0; sleep 3; done; exit 0'
 
 [Install]
 WantedBy=multi-user.target
