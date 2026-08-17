@@ -1216,6 +1216,54 @@ EOL
     log ".bash_aliases updated successfully with interactive selections and sorted output."
 }
 
+# the distro extend below needs observium's helper, which ships only inside the
+# CE tarball - we keep a copy of it in our own archive
+install_distro_helper() {
+    local helper="/usr/local/bin/distro"
+    local bundled="/opt/observium/scripts/distro"
+    local url="https://raw.githubusercontent.com/mews-se/observium-ce-archive/main/scripts/distro"
+    local tmp
+
+    tmp="$(mktemp)"
+    if [ -f "$bundled" ]; then
+        # on the observium server itself, follow the copy it ships with
+        if ! sudo cp "$bundled" "$tmp"; then
+            rm -f "$tmp"
+            log "Could not read $bundled." "WARN"
+            return 1
+        fi
+    elif ! curl -fsSL "$url" -o "$tmp"; then
+        rm -f "$tmp"
+        log "Could not fetch the distro helper; the distro extend will keep reporting an error." "WARN"
+        return 1
+    fi
+
+    if ! head -n 1 "$tmp" | grep -q '^#!'; then
+        rm -f "$tmp"
+        log "Fetched distro helper is not a script; leaving the existing one alone." "WARN"
+        return 1
+    fi
+
+    if [ -f "$helper" ] && cmp -s "$tmp" "$helper"; then
+        rm -f "$tmp"
+        log "Distro helper is already up to date."
+        return 0
+    fi
+
+    if [ -f "$helper" ]; then
+        backup_file "$helper" >/dev/null || true
+    fi
+
+    if ! sudo install -o root -g root -m 0755 "$tmp" "$helper"; then
+        rm -f "$tmp"
+        log "Failed to install the distro helper." "ERROR"
+        return 1
+    fi
+
+    rm -f "$tmp"
+    log "Distro helper installed at $helper."
+}
+
 install_configure_snmpd() {
     log "Installing and configuring SNMPD."
 
@@ -1242,6 +1290,8 @@ install_configure_snmpd() {
     else
         log "snmpd package is already installed. No changes needed."
     fi
+
+    install_distro_helper || true
 
     local SNMPD_CONF_FILE="/etc/snmp/snmpd.conf"
     local SNMPD_CONF_TMP
