@@ -7,6 +7,21 @@ set -euo pipefail
 
 trap 'echo "Script interrupted. Exiting..."; exit 1' SIGINT SIGTERM
 
+# temp files land in /etc and in the user's home, so an interrupt would leave
+# them scattered around - every mktemp registers its file here instead
+HOSTCTL_TMPFILES=()
+
+cleanup_tmpfiles() {
+    local f
+    if [ "${#HOSTCTL_TMPFILES[@]}" -gt 0 ]; then
+        for f in "${HOSTCTL_TMPFILES[@]}"; do
+            sudo rm -f "$f"
+        done
+    fi
+}
+
+trap cleanup_tmpfiles EXIT
+
 if [ "${EUID}" -ne 0 ]; then
     echo "Error: this script must be run as root, use sudo." >&2
     exit 1
@@ -312,60 +327,34 @@ select_profile() {
 SNMP_ROCOMMUNITY=""
 SNMP_HARDWARE_EXTENDS=""
 
+SNMP_EXTENDS_X64=$(cat <<'EOL'
+#Regular Linux:
+extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /sys/devices/virtual/dmi/id/product_name
+extend .1.3.6.1.4.1.2021.7890.3 vendor   /bin/cat /sys/devices/virtual/dmi/id/sys_vendor
+extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /sys/devices/virtual/dmi/id/product_serial
+# Raspberry Pi:
+#extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /proc/device-tree/model
+#extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /proc/device-tree/serial-number
+EOL
+)
+
+SNMP_EXTENDS_PI=$(cat <<'EOL'
+#Regular Linux:
+#extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /sys/devices/virtual/dmi/id/product_name
+#extend .1.3.6.1.4.1.2021.7890.3 vendor   /bin/cat /sys/devices/virtual/dmi/id/sys_vendor
+#extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /sys/devices/virtual/dmi/id/product_serial
+# Raspberry Pi:
+extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /proc/device-tree/model
+extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /proc/device-tree/serial-number
+EOL
+)
+
 apply_profile_config() {
     case "$PROFILE" in
-        x64)
-            SNMP_ROCOMMUNITY="martin"
-            SNMP_HARDWARE_EXTENDS=$(cat <<'EOL'
-#Regular Linux:
-extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /sys/devices/virtual/dmi/id/product_name
-extend .1.3.6.1.4.1.2021.7890.3 vendor   /bin/cat /sys/devices/virtual/dmi/id/sys_vendor
-extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /sys/devices/virtual/dmi/id/product_serial
-# Raspberry Pi:
-#extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /proc/device-tree/model
-#extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /proc/device-tree/serial-number
-EOL
-)
-            ;;
-        x64-brk)
-            SNMP_ROCOMMUNITY="brk"
-            SNMP_HARDWARE_EXTENDS=$(cat <<'EOL'
-#Regular Linux:
-extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /sys/devices/virtual/dmi/id/product_name
-extend .1.3.6.1.4.1.2021.7890.3 vendor   /bin/cat /sys/devices/virtual/dmi/id/sys_vendor
-extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /sys/devices/virtual/dmi/id/product_serial
-# Raspberry Pi:
-#extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /proc/device-tree/model
-#extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /proc/device-tree/serial-number
-EOL
-)
-            ;;
-        pi)
-            SNMP_ROCOMMUNITY="martin"
-            SNMP_HARDWARE_EXTENDS=$(cat <<'EOL'
-#Regular Linux:
-#extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /sys/devices/virtual/dmi/id/product_name
-#extend .1.3.6.1.4.1.2021.7890.3 vendor   /bin/cat /sys/devices/virtual/dmi/id/sys_vendor
-#extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /sys/devices/virtual/dmi/id/product_serial
-# Raspberry Pi:
-extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /proc/device-tree/model
-extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /proc/device-tree/serial-number
-EOL
-)
-            ;;
-        pi-brk)
-            SNMP_ROCOMMUNITY="brk"
-            SNMP_HARDWARE_EXTENDS=$(cat <<'EOL'
-#Regular Linux:
-#extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /sys/devices/virtual/dmi/id/product_name
-#extend .1.3.6.1.4.1.2021.7890.3 vendor   /bin/cat /sys/devices/virtual/dmi/id/sys_vendor
-#extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /sys/devices/virtual/dmi/id/product_serial
-# Raspberry Pi:
-extend .1.3.6.1.4.1.2021.7890.2 hardware /bin/cat /proc/device-tree/model
-extend .1.3.6.1.4.1.2021.7890.4 serial   /bin/cat /proc/device-tree/serial-number
-EOL
-)
-            ;;
+        x64)     SNMP_ROCOMMUNITY="martin"; SNMP_HARDWARE_EXTENDS="$SNMP_EXTENDS_X64" ;;
+        x64-brk) SNMP_ROCOMMUNITY="brk";    SNMP_HARDWARE_EXTENDS="$SNMP_EXTENDS_X64" ;;
+        pi)      SNMP_ROCOMMUNITY="martin"; SNMP_HARDWARE_EXTENDS="$SNMP_EXTENDS_PI" ;;
+        pi-brk)  SNMP_ROCOMMUNITY="brk";    SNMP_HARDWARE_EXTENDS="$SNMP_EXTENDS_PI" ;;
         *)
             log "Unknown profile '$PROFILE'. Valid: x64, x64-brk, pi, pi-brk" "ERROR"
             exit 1
@@ -513,6 +502,7 @@ run_remote_root_script() {
     local quoted_tmp
 
     tmp="$(mktemp)"
+    HOSTCTL_TMPFILES+=("$tmp")
     if ! curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$tmp"; then
         rm -f "$tmp"
         log "Failed to download $label." "ERROR"
@@ -620,6 +610,7 @@ self_update() {
     cache_buster="$(date +%s)"
 
     tmp="$(mktemp "$(dirname "$script_path")/.hostctl-update.XXXXXX")"
+    HOSTCTL_TMPFILES+=("$tmp")
     if ! curl --proto '=https' --tlsv1.2 -fsSL "${update_url}?${cache_buster}" -o "$tmp"; then
         rm -f "$tmp"
         log "Failed to download the latest hostctl.sh." "ERROR"
@@ -676,6 +667,7 @@ update_sudoers() {
     local backup_path=""
 
     sudoers_tmp="$(sudo mktemp /etc/sudoers.d/.hostctl-sudoers.XXXXXX)"
+    HOSTCTL_TMPFILES+=("$sudoers_tmp")
     if ! printf '%s\n' "$sudoers_content" | sudo tee "$sudoers_tmp" >/dev/null; then
         sudo rm -f "$sudoers_tmp"
         log "Failed to write temporary sudoers file." "ERROR"
@@ -732,6 +724,7 @@ configure_ssh() {
     allow_users="$(get_allowed_ssh_users)"
 
     sshd_tmp="$(sudo mktemp /etc/ssh/.hostctl-sshd_config.XXXXXX)"
+    HOSTCTL_TMPFILES+=("$sshd_tmp")
     if ! sudo awk -v allow_users="$allow_users" '
         function emit_hostctl_settings() {
             print "PermitRootLogin no"
@@ -1008,6 +1001,7 @@ create_bashrc() {
 
     sudo -u "$SUDO_USER" mkdir -p "$(dirname "$BASHRC_FILE")"
     BASHRC_TEMP="$(sudo -u "$SUDO_USER" mktemp "$USER_HOME/.bashrc.tmp.XXXXXX")"
+    HOSTCTL_TMPFILES+=("$BASHRC_TEMP")
 
     if [ -f "$BASHRC_FILE" ]; then
         if ! backup_file "$BASHRC_FILE" >/dev/null; then
@@ -1099,6 +1093,7 @@ create_bash_aliases() {
 
     BACKUP_FILE="$ALIASES_FILE.bak_$(date +%F_%H-%M-%S)"
     TEMP_FILE="$(sudo -u "$SUDO_USER" mktemp "$USER_HOME/.bash_aliases.tmp.XXXXXX")"
+    HOSTCTL_TMPFILES+=("$TEMP_FILE")
 
     local RED GREEN YELLOW CYAN NC
     RED='\033[0;31m'
@@ -1225,6 +1220,7 @@ install_distro_helper() {
     local tmp
 
     tmp="$(mktemp)"
+    HOSTCTL_TMPFILES+=("$tmp")
     if [ -f "$bundled" ]; then
         # on the observium server itself, follow the copy it ships with
         if ! sudo cp "$bundled" "$tmp"; then
@@ -1297,6 +1293,7 @@ install_configure_snmpd() {
     local SNMPD_CONF_TMP
     local SNMPD_BACKUP=""
     SNMPD_CONF_TMP="$(sudo mktemp /etc/snmp/.hostctl-snmpd.XXXXXX)"
+    HOSTCTL_TMPFILES+=("$SNMPD_CONF_TMP")
 
     local SNMPD_CONF_CONTENT
     SNMPD_CONF_CONTENT=$(cat <<EOF
@@ -1861,39 +1858,47 @@ install_wakeonlan() {
 
 # the repo's own updatefastfetch.sh is the source of truth, older hostctl
 # versions overwrote it and such local changes are discarded
+# clone or fast-forward one of our repos into the user's home
+clone_repository() {
+    local repo_url="$1"
+    local dest_dir="$2"
+    local script_path="$3"
+
+    if [ -d "$dest_dir/.git" ]; then
+        log "Repository already exists at $dest_dir. Updating."
+        # Discard local modifications (earlier hostctl versions wrote over the
+        # cloned scripts, which makes a plain pull abort).
+        sudo -u "$SUDO_USER" git -C "$dest_dir" checkout -- . 2>/dev/null || true
+        sudo -u "$SUDO_USER" git -C "$dest_dir" pull --ff-only || {
+            log "Failed to update existing repository at $dest_dir." "ERROR"
+            return 1
+        }
+    elif [ -d "$dest_dir" ]; then
+        log "Directory $dest_dir exists but is not a git repository. Leaving it unchanged." "ERROR"
+        return 1
+    else
+        sudo -u "$SUDO_USER" git clone "$repo_url" "$dest_dir" || {
+            log "Failed to clone repository to $dest_dir." "ERROR"
+            return 1
+        }
+        log "Repository cloned successfully to $dest_dir."
+    fi
+
+    if [ ! -f "$script_path" ]; then
+        log "$(basename "$script_path") not found in the repository." "ERROR"
+        return 1
+    fi
+    sudo -u "$SUDO_USER" chmod 0750 "$script_path"
+}
+
 clone_fastfetch_repository() {
     log "Preparing update-fastfetch repository."
 
-    local REPO_URL="https://github.com/mews-se/update-fastfetch.git"
     local DEST_DIR="$USER_HOME/update-fastfetch"
     local SCRIPT_PATH="$DEST_DIR/updatefastfetch.sh"
     local response
 
-    if [ -d "$DEST_DIR/.git" ]; then
-        log "Repository already exists at $DEST_DIR. Updating."
-        # Discard local modifications (earlier hostctl versions wrote over
-        # updatefastfetch.sh, which makes a plain pull abort).
-        sudo -u "$SUDO_USER" git -C "$DEST_DIR" checkout -- . 2>/dev/null || true
-        sudo -u "$SUDO_USER" git -C "$DEST_DIR" pull --ff-only || {
-            log "Failed to update existing repository at $DEST_DIR." "ERROR"
-            return 1
-        }
-    elif [ -d "$DEST_DIR" ]; then
-        log "Directory $DEST_DIR exists but is not a git repository. Leaving it unchanged." "ERROR"
-        return 1
-    else
-        sudo -u "$SUDO_USER" git clone "$REPO_URL" "$DEST_DIR" || {
-            log "Failed to clone repository to $DEST_DIR." "ERROR"
-            return 1
-        }
-        log "Repository cloned successfully to $DEST_DIR."
-    fi
-
-    if [ ! -f "$SCRIPT_PATH" ]; then
-        log "updatefastfetch.sh not found in the repository." "ERROR"
-        return 1
-    fi
-    sudo -u "$SUDO_USER" chmod 0750 "$SCRIPT_PATH"
+    clone_repository "https://github.com/mews-se/update-fastfetch.git" "$DEST_DIR" "$SCRIPT_PATH" || return 1
 
     log "update-fastfetch ready at $SCRIPT_PATH"
 
@@ -1911,33 +1916,11 @@ clone_fastfetch_repository() {
 clone_geodebtest_repository() {
     log "Preparing geodebtest repository."
 
-    local REPO_URL="https://github.com/mews-se/geodebtest.git"
     local DEST_DIR="$USER_HOME/geodebtest"
     local SCRIPT_PATH="$DEST_DIR/geodebtest.sh"
     local response
 
-    if [ -d "$DEST_DIR/.git" ]; then
-        log "Repository already exists at $DEST_DIR. Pulling latest changes."
-        sudo -u "$SUDO_USER" git -C "$DEST_DIR" pull --ff-only || {
-            log "Failed to update existing repository at $DEST_DIR." "ERROR"
-            return 1
-        }
-    elif [ -d "$DEST_DIR" ]; then
-        log "Directory $DEST_DIR exists but is not a git repository. Leaving it unchanged." "ERROR"
-        return 1
-    else
-        sudo -u "$SUDO_USER" git clone "$REPO_URL" "$DEST_DIR" || {
-            log "Failed to clone repository to $DEST_DIR." "ERROR"
-            return 1
-        }
-        log "Repository cloned successfully to $DEST_DIR."
-    fi
-
-    if [ ! -f "$SCRIPT_PATH" ]; then
-        log "geodebtest.sh not found in the repository." "ERROR"
-        return 1
-    fi
-    sudo -u "$SUDO_USER" chmod 0750 "$SCRIPT_PATH"
+    clone_repository "https://github.com/mews-se/geodebtest.git" "$DEST_DIR" "$SCRIPT_PATH" || return 1
 
     log "geodebtest ready at $SCRIPT_PATH"
 
@@ -2601,6 +2584,7 @@ disable_wifi_powersave() {
     local udev_rule="/etc/udev/rules.d/70-wifi-powersave-off.rules"
     local udev_tmp
     udev_tmp="$(sudo mktemp /etc/udev/rules.d/.hostctl-powersave.XXXXXX)"
+    HOSTCTL_TMPFILES+=("$udev_tmp")
     if ! printf '%s\n' 'ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", RUN+="/usr/sbin/iw dev %k set power_save off"' | sudo tee "$udev_tmp" >/dev/null; then
         sudo rm -f "$udev_tmp"
         log "Failed to write the udev rule." "ERROR"
@@ -2622,6 +2606,7 @@ disable_wifi_powersave() {
     local unit_file="/etc/systemd/system/wifi-powersave-off.service"
     local unit_tmp
     unit_tmp="$(sudo mktemp /etc/systemd/system/.hostctl-wifi-powersave.XXXXXX)"
+    HOSTCTL_TMPFILES+=("$unit_tmp")
     if ! cat <<'EOF' | sudo tee "$unit_tmp" >/dev/null
 [Unit]
 Description=Disable WiFi power save on all wireless interfaces
