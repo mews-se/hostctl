@@ -43,7 +43,7 @@ if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v2026.08.17"
+SCRIPT_VERSION="v2026.08.18"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 log() {
@@ -1619,6 +1619,127 @@ install_docker_ce() {
     fi
 }
 
+deploy_observium_stack() {
+    local dir="$USER_HOME/docker-observium"
+    local url="https://raw.githubusercontent.com/mews-se/docker-observium/main/docker-compose.yml"
+    local reply tmp
+
+    if ! command -v docker >/dev/null 2>&1 || ! sudo docker compose version >/dev/null 2>&1; then
+        log "Docker with the Compose plugin is required. Install it from the menu first." "ERROR"
+        return 1
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        log "curl is required to fetch the compose file." "ERROR"
+        return 1
+    fi
+
+    echo
+    read -rp "Directory for the stack [$dir]: " reply < /dev/tty
+    if [ -n "$reply" ]; then
+        dir="$reply"
+    fi
+    local compose="$dir/docker-compose.yml"
+    local envfile="$dir/.env"
+
+    # mariadb keeps whatever password it was initialised with, so a wrong guess
+    # here cannot be corrected by editing .env afterwards
+    local db_pass db_repeat
+    while :; do
+        read -rsp "Password for the observium database user: " db_pass < /dev/tty
+        echo
+        if [ -z "$db_pass" ]; then
+            echo "The password cannot be empty."
+            continue
+        fi
+        read -rsp "Repeat the password: " db_repeat < /dev/tty
+        echo
+        [ "$db_pass" = "$db_repeat" ] && break
+        echo "The passwords did not match."
+    done
+
+    local http_port timezone admin_user admin_pass=""
+    read -rp "HTTP port [8080]: " http_port < /dev/tty
+    http_port="${http_port:-8080}"
+    timezone="$(cat /etc/timezone 2>/dev/null)"
+    timezone="${timezone:-UTC}"
+    read -rp "Timezone [$timezone]: " reply < /dev/tty
+    if [ -n "$reply" ]; then
+        timezone="$reply"
+    fi
+    read -rp "Admin account to create on first start (blank to skip): " admin_user < /dev/tty
+    if [ -n "$admin_user" ]; then
+        read -rsp "Password for $admin_user: " admin_pass < /dev/tty
+        echo
+    fi
+
+    if ! sudo install -d -o "$SUDO_USER" -g "$SUDO_USER" -m 0755 "$dir"; then
+        log "Could not create $dir." "ERROR"
+        return 1
+    fi
+
+    tmp="$(mktemp)"
+    HOSTCTL_TMPFILES+=("$tmp")
+    if ! curl -fsSL "$url" -o "$tmp"; then
+        rm -f "$tmp"
+        log "Could not fetch the compose file from $url." "ERROR"
+        return 1
+    fi
+    if ! grep -q 'ghcr.io/mews-se/observium' "$tmp"; then
+        rm -f "$tmp"
+        log "Fetched file does not look like the Observium compose file." "ERROR"
+        return 1
+    fi
+
+    if [ -f "$compose" ]; then
+        backup_file "$compose" >/dev/null || true
+    fi
+    if ! sudo install -o "$SUDO_USER" -g "$SUDO_USER" -m 0644 "$tmp" "$compose"; then
+        rm -f "$tmp"
+        log "Could not write $compose." "ERROR"
+        return 1
+    fi
+    rm -f "$tmp"
+
+    # the env file carries the passwords, so it is written through a private
+    # temp file and never becomes world readable
+    tmp="$(mktemp)"
+    HOSTCTL_TMPFILES+=("$tmp")
+    chmod 600 "$tmp"
+    {
+        printf 'DB_PASS=%s\n' "$db_pass"
+        printf 'HTTP_PORT=%s\n' "$http_port"
+        printf 'TZ=%s\n' "$timezone"
+        printf 'OBSERVIUM_ADMIN_USER=%s\n' "$admin_user"
+        printf 'OBSERVIUM_ADMIN_PASS=%s\n' "$admin_pass"
+    } > "$tmp"
+
+    if [ -f "$envfile" ]; then
+        backup_file "$envfile" >/dev/null || true
+    fi
+    if ! sudo install -o "$SUDO_USER" -g "$SUDO_USER" -m 0600 "$tmp" "$envfile"; then
+        rm -f "$tmp"
+        log "Could not write $envfile." "ERROR"
+        return 1
+    fi
+    rm -f "$tmp"
+
+    log "Wrote $compose and $envfile."
+    read -rp "Start the stack now? [y/N]: " reply < /dev/tty
+    if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+        log "Stack not started. Run 'docker compose up -d' in $dir when ready."
+        return 0
+    fi
+
+    if ! sudo docker compose -f "$compose" up -d; then
+        log "Compose failed to start the stack." "ERROR"
+        return 1
+    fi
+    log "Observium is starting. The web interface answers on port $http_port once the database has initialised."
+    if [ -z "$admin_user" ]; then
+        log "No admin account was requested; create the first one with adduser.php inside the web container."
+    fi
+}
+
 docker_maintenance() {
     if ! command -v docker >/dev/null 2>&1; then
         log "Docker is not installed." "ERROR"
@@ -2686,13 +2807,14 @@ menu() {
         echo "  22) Install Wake-on-LAN tools"
         echo "  23) Clone/update the update-fastfetch repo"
         echo "  24) Clone/update geodebtest (Debian mirror benchmark)"
+        echo "  25) Deploy the Observium stack (Docker Compose)"
         echo ""
         echo "Status and recovery:"
-        echo "  25) Run health check"
-        echo "  26) Show important paths"
-        echo "  27) Show current profile config"
-        echo "  28) Show available backups"
-        echo "  29) Restore from backup"
+        echo "  26) Run health check"
+        echo "  27) Show important paths"
+        echo "  28) Show current profile config"
+        echo "  29) Show available backups"
+        echo "  30) Restore from backup"
         echo ""
         echo "   0) Exit"
 
@@ -2723,11 +2845,12 @@ menu() {
             22) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
             23) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
             24) run_menu_action "Clone/update geodebtest" clone_geodebtest_repository ;;
-            25) run_menu_action "Run health check" run_health_check ;;
-            26) run_menu_action "Show important paths" show_important_paths ;;
-            27) run_menu_action "Show current profile config" show_current_profile_config ;;
-            28) run_menu_action "Show available backups" show_available_backups ;;
-            29) run_menu_action "Restore from backup" restore_from_backup ;;
+            25) run_menu_action "Deploy the Observium stack" deploy_observium_stack ;;
+            26) run_menu_action "Run health check" run_health_check ;;
+            27) run_menu_action "Show important paths" show_important_paths ;;
+            28) run_menu_action "Show current profile config" show_current_profile_config ;;
+            29) run_menu_action "Show available backups" show_available_backups ;;
+            30) run_menu_action "Restore from backup" restore_from_backup ;;
             0)
                 log "Script execution completed."
                 log "Apply the following command manually to source both .bashrc and .bash_aliases files:"

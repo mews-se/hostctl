@@ -1,6 +1,6 @@
 # hostctl
 
-![Version](https://img.shields.io/badge/version-v2026.08.17-informational)
+![Version](https://img.shields.io/badge/version-v2026.08.18-informational)
 [![ShellCheck](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml)
 ![Shell: Bash](https://img.shields.io/badge/shell-bash-4EAA25.svg?logo=gnubash&logoColor=white)
 ![Platform: Debian based](https://img.shields.io/badge/platform-Debian%20based-A81D33.svg?logo=debian&logoColor=white)
@@ -37,6 +37,8 @@ killing the script.
 - Wake-on-LAN tools
 - Fastfetch repository and updater integration
 - geodebtest integration: Debian mirror benchmark (clone/update and run; can apply the chosen mirror to the APT sources)
+- Observium stack deployment: writes a Compose file and `.env` for the
+  [docker-observium](https://github.com/mews-se/docker-observium) image and can start it
 
 ### Status and recovery
 - Health check: configuration state, services, disk usage, failed systemd
