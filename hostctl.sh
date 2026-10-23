@@ -547,18 +547,6 @@ run_remote_root_script() {
     rm -f "$tmp"
 }
 
-dietpi_bullseye_to_bookworm() {
-    log "DietPi upgrade: Bullseye -> Bookworm"
-    if run_remote_root_script \
-        "DietPi Bullseye -> Bookworm upgrade" \
-        "https://raw.githubusercontent.com/MichaIng/DietPi/dev/.meta/dietpi-bookworm-upgrade"; then
-        log "DietPi upgrade Bullseye -> Bookworm finished."
-    else
-        log "DietPi upgrade Bullseye -> Bookworm failed or was cancelled." "ERROR"
-        return 1
-    fi
-}
-
 dietpi_bookworm_to_trixie() {
     log "DietPi upgrade: Bookworm -> Trixie"
     if run_remote_root_script \
@@ -2782,40 +2770,39 @@ menu() {
         echo "System:"
         echo "   1) System update and upgrade"
         echo "   2) Check if reboot is required"
-        echo "   3) DietPi: Bullseye -> Bookworm"
-        echo "   4) DietPi: Bookworm -> Trixie"
-        echo "   5) Self-update hostctl"
+        echo "   3) DietPi: Bookworm -> Trixie"
+        echo "   4) Self-update hostctl"
         echo ""
         echo "Setup and configuration:"
-        echo "   6) Update sudoers"
-        echo "   7) Configure SSH"
-        echo "   8) Generate SSH key"
-        echo "   9) Distribute SSH key to other hosts"
-        echo "  10) Create/Update .bashrc"
-        echo "  11) Create/Update .bash_aliases"
-        echo "  12) Configure UFW firewall"
-        echo "  13) Disable WiFi power save"
+        echo "   5) Update sudoers"
+        echo "   6) Configure SSH"
+        echo "   7) Generate SSH key"
+        echo "   8) Distribute SSH key to other hosts"
+        echo "   9) Create/Update .bashrc"
+        echo "  10) Create/Update .bash_aliases"
+        echo "  11) Configure UFW firewall"
+        echo "  12) Disable WiFi power save"
         echo ""
         echo "Services and applications:"
-        echo "  14) Install and configure SNMPD"
-        echo "  15) Remove SNMPD"
-        echo "  16) Install Docker official repo"
-        echo "  17) Install Docker and relevant tools"
-        echo "  18) Docker maintenance (prune / Compose update)"
-        echo "  19) Remove Docker and relevant tools"
-        echo "  20) Install PiVPN"
-        echo "  21) Remove PiVPN"
-        echo "  22) Install Wake-on-LAN tools"
-        echo "  23) Clone/update the update-fastfetch repo"
-        echo "  24) Clone/update geodebtest (Debian mirror benchmark)"
-        echo "  25) Deploy the Observium stack (Docker Compose)"
+        echo "  13) Install and configure SNMPD"
+        echo "  14) Remove SNMPD"
+        echo "  15) Install Docker official repo"
+        echo "  16) Install Docker and relevant tools"
+        echo "  17) Docker maintenance (prune / Compose update)"
+        echo "  18) Remove Docker and relevant tools"
+        echo "  19) Install PiVPN"
+        echo "  20) Remove PiVPN"
+        echo "  21) Install Wake-on-LAN tools"
+        echo "  22) Clone/update the update-fastfetch repo"
+        echo "  23) Clone/update geodebtest (Debian mirror benchmark)"
+        echo "  24) Deploy the Observium stack (Docker Compose)"
         echo ""
         echo "Status and recovery:"
-        echo "  26) Run health check"
-        echo "  27) Show important paths"
-        echo "  28) Show current profile config"
-        echo "  29) Show available backups"
-        echo "  30) Restore from backup"
+        echo "  25) Run health check"
+        echo "  26) Show important paths"
+        echo "  27) Show current profile config"
+        echo "  28) Show available backups"
+        echo "  29) Restore from backup"
         echo ""
         echo "   0) Exit"
 
@@ -2824,34 +2811,33 @@ menu() {
         case "$choice" in
             1) run_menu_action "System update and upgrade" system_update_upgrade ;;
             2) run_menu_action "Check if reboot is required" check_reboot_required ;;
-            3) run_menu_action "DietPi: Bullseye -> Bookworm" dietpi_bullseye_to_bookworm ;;
-            4) run_menu_action "DietPi: Bookworm -> Trixie" dietpi_bookworm_to_trixie ;;
-            5) run_menu_action "Self-update hostctl" self_update ;;
-            6) run_menu_action "Update sudoers" update_sudoers ;;
-            7) run_menu_action "Configure SSH" configure_ssh ;;
-            8) run_menu_action "Generate SSH key" generate_ssh_key ;;
-            9) run_menu_action "Distribute SSH key to other hosts" distribute_ssh_key ;;
-            10) run_menu_action "Create/Update .bashrc" create_bashrc ;;
-            11) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
-            12) run_menu_action "Configure UFW firewall" configure_ufw ;;
-            13) run_menu_action "Disable WiFi power save" disable_wifi_powersave ;;
-            14) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
-            15) run_menu_action "Remove SNMPD" remove_snmpd ;;
-            16) run_menu_action "Install Docker official repo" install_docker_repository ;;
-            17) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
-            18) run_menu_action "Docker maintenance" docker_maintenance ;;
-            19) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
-            20) run_menu_action "Install PiVPN" install_pivpn ;;
-            21) run_menu_action "Remove PiVPN" remove_pivpn ;;
-            22) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
-            23) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
-            24) run_menu_action "Clone/update geodebtest" clone_geodebtest_repository ;;
-            25) run_menu_action "Deploy the Observium stack" deploy_observium_stack ;;
-            26) run_menu_action "Run health check" run_health_check ;;
-            27) run_menu_action "Show important paths" show_important_paths ;;
-            28) run_menu_action "Show current profile config" show_current_profile_config ;;
-            29) run_menu_action "Show available backups" show_available_backups ;;
-            30) run_menu_action "Restore from backup" restore_from_backup ;;
+            3) run_menu_action "DietPi: Bookworm -> Trixie" dietpi_bookworm_to_trixie ;;
+            4) run_menu_action "Self-update hostctl" self_update ;;
+            5) run_menu_action "Update sudoers" update_sudoers ;;
+            6) run_menu_action "Configure SSH" configure_ssh ;;
+            7) run_menu_action "Generate SSH key" generate_ssh_key ;;
+            8) run_menu_action "Distribute SSH key to other hosts" distribute_ssh_key ;;
+            9) run_menu_action "Create/Update .bashrc" create_bashrc ;;
+            10) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
+            11) run_menu_action "Configure UFW firewall" configure_ufw ;;
+            12) run_menu_action "Disable WiFi power save" disable_wifi_powersave ;;
+            13) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
+            14) run_menu_action "Remove SNMPD" remove_snmpd ;;
+            15) run_menu_action "Install Docker official repo" install_docker_repository ;;
+            16) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
+            17) run_menu_action "Docker maintenance" docker_maintenance ;;
+            18) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
+            19) run_menu_action "Install PiVPN" install_pivpn ;;
+            20) run_menu_action "Remove PiVPN" remove_pivpn ;;
+            21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
+            22) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
+            23) run_menu_action "Clone/update geodebtest" clone_geodebtest_repository ;;
+            24) run_menu_action "Deploy the Observium stack" deploy_observium_stack ;;
+            25) run_menu_action "Run health check" run_health_check ;;
+            26) run_menu_action "Show important paths" show_important_paths ;;
+            27) run_menu_action "Show current profile config" show_current_profile_config ;;
+            28) run_menu_action "Show available backups" show_available_backups ;;
+            29) run_menu_action "Restore from backup" restore_from_backup ;;
             0)
                 log "Script execution completed."
                 log "Apply the following command manually to source both .bashrc and .bash_aliases files:"

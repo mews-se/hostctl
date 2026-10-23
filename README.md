@@ -17,7 +17,7 @@ killing the script.
 ### System
 - System update and distribution upgrade
 - Reboot-required detection
-- DietPi distribution upgrade helpers (Bullseye → Bookworm, Bookworm → Trixie)
+- DietPi distribution upgrade helper (Bookworm → Trixie)
 - Self-update from GitHub with syntax validation and confirmation
 
 ### Setup and configuration
@@ -105,7 +105,7 @@ newest backups are kept per file; older ones are pruned automatically.
 
 ### Remote installers
 
-DietPi upgrade helpers and the PiVPN installer are downloaded to secure
+The DietPi upgrade helper and the PiVPN installer are downloaded to secure
 temporary files instead of being piped directly into Bash.
 
 Before execution, the script:
