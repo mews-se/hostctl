@@ -43,7 +43,7 @@ if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v2026.09.08"
+SCRIPT_VERSION="v2026.10.23"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 log() {
@@ -1111,8 +1111,10 @@ create_bash_aliases() {
     local NEW_ALIASES
     NEW_ALIASES=$(cat <<'EOL'
 alias apta="sudo apt-get update && sudo apt-get dist-upgrade -y && sudo apt-get autoremove -y && sudo apt-get clean"
+alias avvikelser="ssh dietpi@10.0.1.15"
 alias bat="batcat"
 alias brkpi="ssh dietpi@10.0.1.8"
+alias callrec="ssh mbx@10.0.1.14"
 alias dcdown="docker compose down"
 alias dclog="docker compose logs -f"
 alias dcpull="docker compose pull"
@@ -1120,12 +1122,13 @@ alias dcstop="docker compose stop"
 alias dcupd="docker compose up -d"
 alias dcupdlog="docker compose up -d && docker compose logs -f"
 alias dellpi="ssh dietpi@10.0.0.6"
+alias dietpibrk="ssh dietpi@10.0.1.11"
 alias fa="fastfetch"
 alias fanauto="sudo dellfan auto"
 alias fanmax="sudo dellfan max"
 alias ff="fastfetch -c all.jsonc"
 alias flight="ssh root@10.0.1.12"
-alias hostctl="rm -rf ~/hostctl ~/startchanges && git clone https://github.com/mews-se/hostctl.git ~/hostctl"
+alias hostctl="rm -rf ~/hostctl && git clone https://github.com/mews-se/hostctl.git ~/hostctl"
 alias kodipi="ssh dietpi@10.0.0.7"
 alias london="ssh dietpi@london.stockzell.se"
 alias mm="ssh martin@10.0.0.11"
