@@ -1966,8 +1966,6 @@ install_wakeonlan() {
     log "Wake-on-LAN setup completed."
 }
 
-# the repo's own updatefastfetch.sh is the source of truth, older hostctl
-# versions overwrote it and such local changes are discarded
 # clone or fast-forward one of our repos into the user's home
 clone_repository() {
     local repo_url="$1"
