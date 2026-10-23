@@ -27,7 +27,7 @@ killing the script.
 - SSH key distribution to other hosts via `ssh-copy-id`
 - Atomic `.bashrc` recreation and interactive `.bash_aliases` merge
 - UFW firewall baseline (SSH allowed; PiVPN and SNMP ports auto-allowed when configured)
-- WiFi power save disable for wireless hosts (persistent via systemd)
+- WiFi power save disable for wireless hosts (persistent via a udev rule and a systemd unit)
 
 ### Services and applications
 - Profile-based SNMPD installation, configuration, and removal
@@ -117,7 +117,11 @@ Before execution, the script:
 
 ### Self-update
 
-The self-update action downloads the latest `hostctl.sh` from the `main`
+When the script runs from a git clone, as in the installation above, the
+self-update action discards local edits to the clone and runs
+`git pull --ff-only`.
+
+A standalone copy instead downloads the latest `hostctl.sh` from the `main`
 branch, verifies Bash syntax, shows the current and new version, and requires
 confirmation. The replacement is an atomic rename, so the running instance is
 unaffected until restarted.
