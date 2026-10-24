@@ -18,7 +18,8 @@ killing the script.
 - System update and distribution upgrade
 - Reboot-required detection
 - DietPi distribution upgrade helper (Bookworm → Trixie)
-- Self-update from GitHub with syntax validation and confirmation
+- Self-update from GitHub: `git pull` in a clone, otherwise a download with
+  syntax validation and confirmation
 
 ### Setup and configuration
 - Passwordless sudo configuration with `visudo` validation
@@ -42,7 +43,7 @@ killing the script.
 
 ### Status and recovery
 - Health check: configuration state, services, disk usage, failed systemd
-  units, CPU temperature, and pending package updates
+  units, CPU temperature, WiFi power save, and pending package updates
 - Configuration backup and restore helpers with automatic pruning
 - Profile information and important-path reporting
 
@@ -58,8 +59,10 @@ A profile is selected when the script starts:
 - `pi`
 - `pi-brk`
 
-Profiles control SNMP community settings, hardware-information sources, and
-other environment-specific defaults.
+Profiles set the SNMP community and where the SNMP hardware information comes
+from: DMI for the `x64` profiles, the device tree for the `pi` profiles.
+Pressing Enter takes the default detected from the architecture, `pi` on ARM
+and `x64` otherwise.
 
 ## Requirements
 
@@ -128,14 +131,17 @@ unaffected until restarted.
 
 ### Docker removal
 
-Docker removal purges the Docker packages and permanently deletes:
+Docker removal purges the Docker packages, removes the Docker APT repository
+files and the `docker` group, and permanently deletes:
 
 ```text
 /var/lib/docker
 /var/lib/containerd
 ```
 
-The action requires typing `REMOVE` before deletion begins.
+The action requires typing `REMOVE` before deletion begins. When the packages
+and data directories are already gone, it only cleans up the leftovers after a
+plain yes/no.
 
 ### SNMPD removal
 
@@ -156,9 +162,9 @@ The Docker maintenance action offers:
 - **Prune**: shows current Docker disk usage, then removes stopped containers,
   unused networks, dangling images, and build cache. Optionally also removes
   all unused images.
-- **Compose stack update**: discovers Docker Compose files under the user's
-  home directory, `/opt`, and `/srv`, then pulls images and restarts each
-  stack after confirmation.
+- **Compose stack update**: discovers Docker Compose files up to three levels
+  under the user's home directory, `/opt`, and `/srv`, then pulls images and
+  restarts every stack after one confirmation.
 
 ## Logs
 
