@@ -1,6 +1,6 @@
 # hostctl
 
-![Version](https://img.shields.io/badge/version-v2026.10.23-informational)
+![Version](https://img.shields.io/badge/version-v2026.11.03-informational)
 [![ShellCheck](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/mews-se/hostctl/actions/workflows/shellcheck.yml)
 ![Shell: Bash](https://img.shields.io/badge/shell-bash-4EAA25.svg?logo=gnubash&logoColor=white)
 ![Platform: Debian based](https://img.shields.io/badge/platform-Debian%20based-A81D33.svg?logo=debian&logoColor=white)
@@ -20,6 +20,7 @@ killing the script.
 - DietPi distribution upgrade helper (Bookworm → Trixie)
 - Self-update from GitHub: `git pull` in a clone, otherwise a download with
   syntax validation and confirmation
+- Old kernel cleanup that restores APT's kernel protection on DietPi
 
 ### Setup and configuration
 - Passwordless sudo configuration with `visudo` validation
@@ -128,6 +129,21 @@ A standalone copy instead downloads the latest `hostctl.sh` from the `main`
 branch, verifies Bash syntax, shows the current and new version, and requires
 confirmation. The replacement is an atomic rename, so the running instance is
 unaffected until restarted.
+
+### Kernel cleanup
+
+DietPi deletes APT's `01autoremove`, so `apt autoremove` no longer knows which
+packages are kernels and tries to remove the running one. Declining that
+removal leaves the kernel marked as manually installed, and from then on
+autoremove never touches it. The cleanup action first writes
+`/etc/apt/apt.conf.d/99local-kernels` with the kernel list from
+`01autoremove`, after which APT keeps the running, newest and previous kernel
+on its own.
+
+It then lists the installed kernels by version. The running and the newest
+kernel are never offered for removal, and a removal that would also take a
+metapackage along is refused. Kernels left marked as manually installed can
+be handed back to autoremove.
 
 ### Docker removal
 

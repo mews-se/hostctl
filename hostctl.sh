@@ -43,7 +43,7 @@ if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v2026.10.23"
+SCRIPT_VERSION="v2026.11.03"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 log() {
@@ -490,6 +490,200 @@ system_update_upgrade() {
 
     log "System update and upgrade completed successfully."
     check_reboot_required
+}
+
+KERNEL_AUTOREMOVE_CONF="/etc/apt/apt.conf.d/99local-kernels"
+
+# DietPi removes apt's 01autoremove and with it the list of kernel packages, so
+# autoremove goes for the running kernel. Aborting that removal leaves the kernel
+# marked as manually installed for good, which is how old kernels pile up
+protect_kernels_from_autoremove() {
+    local tmp
+
+    if [ ! -f "$KERNEL_AUTOREMOVE_CONF" ] && \
+       grep -q '^APT::VersionedKernelPackages:: ' <<< "$(apt-config dump 2>/dev/null)"; then
+        log "APT already protects the running and newest kernels from autoremove."
+        return 0
+    fi
+
+    tmp="$(mktemp)"
+    HOSTCTL_TMPFILES+=("$tmp")
+    cat > "$tmp" <<'EOL'
+// written by hostctl: the kernel list from apt's 01autoremove, which DietPi removes
+APT::VersionedKernelPackages { "linux-.*"; };
+EOL
+
+    if [ -f "$KERNEL_AUTOREMOVE_CONF" ] && cmp -s "$tmp" "$KERNEL_AUTOREMOVE_CONF"; then
+        rm -f "$tmp"
+        log "Kernel autoremove protection is already in place."
+        return 0
+    fi
+
+    if ! apt-config -c "$tmp" dump >/dev/null 2>&1; then
+        rm -f "$tmp"
+        log "The kernel autoremove protection failed APT's syntax check." "ERROR"
+        return 1
+    fi
+
+    if ! sudo install -m 0644 "$tmp" "$KERNEL_AUTOREMOVE_CONF"; then
+        rm -f "$tmp"
+        log "Failed to write $KERNEL_AUTOREMOVE_CONF." "ERROR"
+        return 1
+    fi
+    rm -f "$tmp"
+
+    if ! grep -qF 'APT::VersionedKernelPackages:: "linux-.*";' <<< "$(apt-config dump 2>/dev/null)"; then
+        log "APT does not pick up $KERNEL_AUTOREMOVE_CONF." "ERROR"
+        return 1
+    fi
+
+    log "Kernel autoremove protection written to $KERNEL_AUTOREMOVE_CONF."
+}
+
+# kernels are sorted by version, not by name, and the running and the newest
+# kernel are never offered for removal
+clean_old_kernels() {
+    local running pkg version newest_version mark note choice num response simulation extra
+    local -a kernels=() removable=() nums=() selection=() purge_list=() manual=() pending=()
+    local -A versions=() auto=()
+
+    log "Cleaning up old kernels."
+    protect_kernels_from_autoremove || return 1
+
+    while read -r pkg version; do
+        kernels+=("$pkg")
+        versions["$pkg"]="$version"
+    done < <(dpkg-query -W -f='${Package} ${Version} ${db:Status-Abbrev}\n' 'linux-image-[0-9]*' 2>/dev/null | \
+        awk '$3 ~ /^ii/ {print $1, $2}' | sort -k2,2V)
+
+    if [ "${#kernels[@]}" -eq 0 ]; then
+        log "No versioned kernel packages are installed. Nothing to clean up."
+        return 0
+    fi
+
+    while read -r pkg; do
+        auto["$pkg"]=1
+    done < <(apt-mark showauto | grep '^linux-image-')
+
+    running="linux-image-$(uname -r)"
+    newest_version="${versions[${kernels[-1]}]}"
+
+    echo
+    echo "Installed kernels, oldest first:"
+    for pkg in "${kernels[@]}"; do
+        mark="manual"
+        if [ -n "${auto[$pkg]+set}" ]; then
+            mark="auto"
+        fi
+        note=""
+        if [ "$pkg" = "$running" ]; then
+            note="running"
+        fi
+        if [ "${versions[$pkg]}" = "$newest_version" ]; then
+            note="${note:+$note, }newest"
+        fi
+
+        if [ -n "$note" ]; then
+            printf '       %-38s %-12s %-6s (%s)\n' "$pkg" "${versions[$pkg]}" "$mark" "$note"
+        else
+            removable+=("$pkg")
+            printf '  %3d) %-38s %-12s %s\n' "${#removable[@]}" "$pkg" "${versions[$pkg]}" "$mark"
+        fi
+    done
+
+    if [ -z "${versions[$running]+set}" ]; then
+        log "The running kernel $(uname -r) is no longer installed. Reboot into the newest kernel first." "WARN"
+        return 0
+    fi
+
+    if [ "${#removable[@]}" -gt 0 ]; then
+        echo
+        read -rp "Kernels to remove (numbers separated by spaces, 'all', or Enter for none): " choice < /dev/tty
+        if [ "$choice" = "all" ]; then
+            selection=("${removable[@]}")
+        else
+            read -ra nums <<< "$choice"
+            for num in "${nums[@]}"; do
+                if [[ ! "$num" =~ ^[0-9]+$ ]] || [ "$num" -lt 1 ] || [ "$num" -gt "${#removable[@]}" ]; then
+                    log "Invalid selection: $num" "ERROR"
+                    return 1
+                fi
+                selection+=("${removable[$((num - 1))]}")
+            done
+        fi
+    fi
+
+    if [ "${#selection[@]}" -gt 0 ]; then
+        for pkg in "${selection[@]}"; do
+            purge_list+=("$pkg")
+            if dpkg-query -W -f='${db:Status-Abbrev}' "linux-headers-${pkg#linux-image-}" 2>/dev/null | grep -q '^i'; then
+                purge_list+=("linux-headers-${pkg#linux-image-}")
+            fi
+        done
+
+        if ! simulation="$(apt-get -s purge "${purge_list[@]}" 2>&1)"; then
+            log "APT cannot remove the selected kernels, a held package probably depends on them." "ERROR"
+            return 1
+        fi
+
+        # a kernel that a metapackage still depends on would take the metapackage along
+        extra="$(awk '/^(Remv|Purg) / {print $2}' <<< "$simulation" | \
+            grep -vxF -f <(printf '%s\n' "${purge_list[@]}") || true)"
+        if [ -n "$extra" ]; then
+            log "Cancelled: purging these kernels would also remove ${extra//$'\n'/ }" "ERROR"
+            return 1
+        fi
+
+        echo
+        echo "Packages to purge:"
+        printf '  %s\n' "${purge_list[@]}"
+        read -rp "Purge these packages? [y/N]: " response < /dev/tty
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+            wait_for_apt
+            if ! sudo apt-get purge -y "${purge_list[@]}"; then
+                log "Failed to purge the selected kernels." "ERROR"
+                return 1
+            fi
+            log "Purged: ${purge_list[*]}"
+        else
+            log "Kernel removal cancelled."
+        fi
+    fi
+
+    mapfile -t manual < <(apt-mark showmanual | grep '^linux-image-[0-9]')
+    if [ "${#manual[@]}" -gt 0 ]; then
+        echo
+        echo "Marked as manually installed, so autoremove never touches them:"
+        printf '  %s\n' "${manual[@]}"
+        read -rp "Hand them over to autoremove (it keeps the running, newest and previous kernel)? [Y/n]: " response < /dev/tty
+        if [[ -z "$response" || "$response" =~ ^[Yy]$ ]]; then
+            if ! sudo apt-mark auto "${manual[@]}" >/dev/null; then
+                log "Failed to mark the kernels as automatically installed." "ERROR"
+                return 1
+            fi
+            log "Marked as automatically installed: ${manual[*]}"
+        fi
+    fi
+
+    mapfile -t pending < <(apt-get -s autoremove 2>/dev/null | awk '/^Remv / {print $2}')
+    if [ "${#pending[@]}" -eq 0 ]; then
+        log "Kernel cleanup finished. Autoremove has nothing to remove."
+        return 0
+    fi
+
+    echo
+    echo "Autoremove would now remove:"
+    printf '  %s\n' "${pending[@]}"
+    read -rp "Run autoremove now? [y/N]: " response < /dev/tty
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        wait_for_apt
+        if ! sudo apt-get autoremove --purge -y; then
+            log "apt-get autoremove failed." "ERROR"
+            return 1
+        fi
+    fi
+
+    log "Kernel cleanup finished."
 }
 
 # a remote installer is never piped straight into bash
@@ -2770,37 +2964,38 @@ menu() {
         echo "   2) Check if reboot is required"
         echo "   3) DietPi: Bookworm -> Trixie"
         echo "   4) Self-update hostctl"
+        echo "   5) Clean up old kernels"
         echo ""
         echo "Setup and configuration:"
-        echo "   5) Update sudoers"
-        echo "   6) Configure SSH"
-        echo "   7) Generate SSH key"
-        echo "   8) Distribute SSH key to other hosts"
-        echo "   9) Create/Update .bashrc"
-        echo "  10) Create/Update .bash_aliases"
-        echo "  11) Configure UFW firewall"
-        echo "  12) Disable WiFi power save"
+        echo "   6) Update sudoers"
+        echo "   7) Configure SSH"
+        echo "   8) Generate SSH key"
+        echo "   9) Distribute SSH key to other hosts"
+        echo "  10) Create/Update .bashrc"
+        echo "  11) Create/Update .bash_aliases"
+        echo "  12) Configure UFW firewall"
+        echo "  13) Disable WiFi power save"
         echo ""
         echo "Services and applications:"
-        echo "  13) Install and configure SNMPD"
-        echo "  14) Remove SNMPD"
-        echo "  15) Install Docker official repo"
-        echo "  16) Install Docker and relevant tools"
-        echo "  17) Docker maintenance (prune / Compose update)"
-        echo "  18) Remove Docker and relevant tools"
-        echo "  19) Install PiVPN"
-        echo "  20) Remove PiVPN"
-        echo "  21) Install Wake-on-LAN tools"
-        echo "  22) Clone/update the update-fastfetch repo"
-        echo "  23) Clone/update geodebtest (Debian mirror benchmark)"
-        echo "  24) Deploy the Observium stack (Docker Compose)"
+        echo "  14) Install and configure SNMPD"
+        echo "  15) Remove SNMPD"
+        echo "  16) Install Docker official repo"
+        echo "  17) Install Docker and relevant tools"
+        echo "  18) Docker maintenance (prune / Compose update)"
+        echo "  19) Remove Docker and relevant tools"
+        echo "  20) Install PiVPN"
+        echo "  21) Remove PiVPN"
+        echo "  22) Install Wake-on-LAN tools"
+        echo "  23) Clone/update the update-fastfetch repo"
+        echo "  24) Clone/update geodebtest (Debian mirror benchmark)"
+        echo "  25) Deploy the Observium stack (Docker Compose)"
         echo ""
         echo "Status and recovery:"
-        echo "  25) Run health check"
-        echo "  26) Show important paths"
-        echo "  27) Show current profile config"
-        echo "  28) Show available backups"
-        echo "  29) Restore from backup"
+        echo "  26) Run health check"
+        echo "  27) Show important paths"
+        echo "  28) Show current profile config"
+        echo "  29) Show available backups"
+        echo "  30) Restore from backup"
         echo ""
         echo "   0) Exit"
 
@@ -2811,31 +3006,32 @@ menu() {
             2) run_menu_action "Check if reboot is required" check_reboot_required ;;
             3) run_menu_action "DietPi: Bookworm -> Trixie" dietpi_bookworm_to_trixie ;;
             4) run_menu_action "Self-update hostctl" self_update ;;
-            5) run_menu_action "Update sudoers" update_sudoers ;;
-            6) run_menu_action "Configure SSH" configure_ssh ;;
-            7) run_menu_action "Generate SSH key" generate_ssh_key ;;
-            8) run_menu_action "Distribute SSH key to other hosts" distribute_ssh_key ;;
-            9) run_menu_action "Create/Update .bashrc" create_bashrc ;;
-            10) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
-            11) run_menu_action "Configure UFW firewall" configure_ufw ;;
-            12) run_menu_action "Disable WiFi power save" disable_wifi_powersave ;;
-            13) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
-            14) run_menu_action "Remove SNMPD" remove_snmpd ;;
-            15) run_menu_action "Install Docker official repo" install_docker_repository ;;
-            16) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
-            17) run_menu_action "Docker maintenance" docker_maintenance ;;
-            18) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
-            19) run_menu_action "Install PiVPN" install_pivpn ;;
-            20) run_menu_action "Remove PiVPN" remove_pivpn ;;
-            21) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
-            22) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
-            23) run_menu_action "Clone/update geodebtest" clone_geodebtest_repository ;;
-            24) run_menu_action "Deploy the Observium stack" deploy_observium_stack ;;
-            25) run_menu_action "Run health check" run_health_check ;;
-            26) run_menu_action "Show important paths" show_important_paths ;;
-            27) run_menu_action "Show current profile config" show_current_profile_config ;;
-            28) run_menu_action "Show available backups" show_available_backups ;;
-            29) run_menu_action "Restore from backup" restore_from_backup ;;
+            5) run_menu_action "Clean up old kernels" clean_old_kernels ;;
+            6) run_menu_action "Update sudoers" update_sudoers ;;
+            7) run_menu_action "Configure SSH" configure_ssh ;;
+            8) run_menu_action "Generate SSH key" generate_ssh_key ;;
+            9) run_menu_action "Distribute SSH key to other hosts" distribute_ssh_key ;;
+            10) run_menu_action "Create/Update .bashrc" create_bashrc ;;
+            11) run_menu_action "Create/Update .bash_aliases" create_bash_aliases ;;
+            12) run_menu_action "Configure UFW firewall" configure_ufw ;;
+            13) run_menu_action "Disable WiFi power save" disable_wifi_powersave ;;
+            14) run_menu_action "Install and configure SNMPD" install_configure_snmpd ;;
+            15) run_menu_action "Remove SNMPD" remove_snmpd ;;
+            16) run_menu_action "Install Docker official repo" install_docker_repository ;;
+            17) run_menu_action "Install Docker and relevant tools" install_docker_ce ;;
+            18) run_menu_action "Docker maintenance" docker_maintenance ;;
+            19) run_menu_action "Remove Docker and relevant tools" remove_docker_and_tools ;;
+            20) run_menu_action "Install PiVPN" install_pivpn ;;
+            21) run_menu_action "Remove PiVPN" remove_pivpn ;;
+            22) run_menu_action "Install Wake-on-LAN tools" install_wakeonlan ;;
+            23) run_menu_action "Clone/update the update-fastfetch repo" clone_fastfetch_repository ;;
+            24) run_menu_action "Clone/update geodebtest" clone_geodebtest_repository ;;
+            25) run_menu_action "Deploy the Observium stack" deploy_observium_stack ;;
+            26) run_menu_action "Run health check" run_health_check ;;
+            27) run_menu_action "Show important paths" show_important_paths ;;
+            28) run_menu_action "Show current profile config" show_current_profile_config ;;
+            29) run_menu_action "Show available backups" show_available_backups ;;
+            30) run_menu_action "Restore from backup" restore_from_backup ;;
             0)
                 log "Script execution completed."
                 log "Apply the following command manually to source both .bashrc and .bash_aliases files:"
