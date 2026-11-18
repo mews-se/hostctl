@@ -43,7 +43,7 @@ if [ -z "$USER_HOME" ] || [ ! -d "$USER_HOME" ]; then
     exit 1
 fi
 
-SCRIPT_VERSION="v2026.11.03"
+SCRIPT_VERSION="v2026.11.18"
 LOG_FILE="$USER_HOME/hostctl.log"
 
 log() {
@@ -1316,7 +1316,6 @@ alias london="ssh dietpi@london.stockzell.se"
 alias mm="ssh martin@10.0.0.11"
 alias nyc="ssh dietpi@newyork.stockzell.se"
 alias nyc2="ssh dietpi@newyork2.stockzell.se"
-alias nyc3="ssh dietpi@newyork3.stockzell.se"
 alias pfsense="ssh -p 2221 admin@10.0.0.1"
 alias pfsensebrk="ssh -p 2221 admin@10.0.1.1"
 alias pizerow="ssh dietpi@10.0.0.13"
